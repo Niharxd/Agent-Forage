@@ -4,9 +4,10 @@ AgentForge is a self-hosted application for turning a task into an inspectable,
 validated workflow. The approved scope, architecture, roadmap, and threat model
 are documented in [`docs/`](docs/).
 
-This repository currently contains the monorepo and package scaffolding only.
-Workflow execution, API behavior, persistence, provider integrations, and
-dashboard features have not been implemented.
+The initial backend milestone provides a versioned FastAPI health API,
+environment-backed settings, and standardized error responses. Workflow
+execution, persistence, provider integrations, authentication, and dashboard
+features have not been implemented.
 
 ## Repository layout
 
@@ -19,11 +20,12 @@ dashboard features have not been implemented.
 | `tests/` | Reserved for cross-package integration tests. |
 | `.github/workflows/` | Continuous-integration workflows. |
 
-Within `backend/app/agentforge/`, `api/routes/` is reserved for HTTP endpoints;
-`config/` for environment-backed settings; `database/` for persistence and
+Within `backend/app/agentforge/`, `main.py` creates the FastAPI application,
+`api/routes/` contains versioned HTTP endpoints, and `config/` contains
+environment-backed settings. `database/` is reserved for persistence and
 migrations; `domain/models/` for domain entities; `workflow/` for orchestration;
 and `agents/`, `tools/`, and `providers/` for their respective interfaces and
-adapters. These modules are intentionally empty at this milestone.
+adapters.
 
 The frontend source lives under `frontend/src/`: `components/` for reusable UI,
 `pages/` for screens, `api/` for API clients, `hooks/` for shared React hooks,
@@ -52,9 +54,34 @@ python -m uv --directory backend sync --all-groups
 npm --prefix frontend ci
 ```
 
-The `.env` file is a local placeholder for future runtime configuration; replace
-the database URL placeholders only with local values. Do not commit `.env` or
-put real credentials in it when sharing logs or examples.
+The `.env` file contains local runtime configuration. `CORS_ORIGINS` is a JSON
+array of explicitly allowed HTTP(S) origins; leave it empty (`[]`) to disable
+cross-origin access. The database URL is not used by this milestone. Do not
+commit `.env` or put real credentials in it when sharing logs or examples.
+
+## Start the backend
+
+From the repository root, start the API with:
+
+```powershell
+python -m uv --directory backend run uvicorn agentforge.main:app --reload
+```
+
+The local liveness endpoint is `http://127.0.0.1:8000/api/v1/health` and returns:
+
+```json
+{
+  "status": "ok",
+  "service": "agentforge-api",
+  "version": "v1",
+  "checks": {
+    "liveness": "ok"
+  }
+}
+```
+
+`GET /api/v1/ready` reports API readiness separately. No database or external AI
+dependencies are initialized or checked in this milestone.
 
 ## Checks
 
