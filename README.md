@@ -4,10 +4,10 @@ AgentForge is a self-hosted application for turning a task into an inspectable,
 validated workflow. The approved scope, architecture, roadmap, and threat model
 are documented in [`docs/`](docs/).
 
-The initial backend milestone provides a versioned FastAPI health API,
-environment-backed settings, and standardized error responses. Workflow
-execution, persistence, provider integrations, authentication, and dashboard
-features have not been implemented.
+The backend provides a versioned FastAPI health API, environment-backed
+settings, standardized error responses, and the PostgreSQL persistence
+foundation. Workflow execution, provider integrations, authentication, and
+dashboard features have not been implemented.
 
 ## Repository layout
 
@@ -22,10 +22,11 @@ features have not been implemented.
 
 Within `backend/app/agentforge/`, `main.py` creates the FastAPI application,
 `api/routes/` contains versioned HTTP endpoints, and `config/` contains
-environment-backed settings. `database/` is reserved for persistence and
-migrations; `domain/models/` for domain entities; `workflow/` for orchestration;
-and `agents/`, `tools/`, and `providers/` for their respective interfaces and
-adapters.
+environment-backed settings. `database/` and `domain/models/` provide
+PostgreSQL persistence and SQLAlchemy models; `workflow/` is reserved for
+orchestration; and `agents/`, `tools/`, and `providers/` for their respective
+interfaces and adapters. See [`backend/README.md`](backend/README.md) for
+database setup and migration commands.
 
 The frontend source lives under `frontend/src/`: `components/` for reusable UI,
 `pages/` for screens, `api/` for API clients, `hooks/` for shared React hooks,
@@ -56,8 +57,9 @@ npm --prefix frontend ci
 
 The `.env` file contains local runtime configuration. `CORS_ORIGINS` is a JSON
 array of explicitly allowed HTTP(S) origins; leave it empty (`[]`) to disable
-cross-origin access. The database URL is not used by this milestone. Do not
-commit `.env` or put real credentials in it when sharing logs or examples.
+cross-origin access. Configure the database URLs and start PostgreSQL as
+described in [`backend/README.md`](backend/README.md). Do not commit `.env` or
+put real credentials in it when sharing logs or examples.
 
 ## Start the backend
 
@@ -80,8 +82,9 @@ The local liveness endpoint is `http://127.0.0.1:8000/api/v1/health` and returns
 }
 ```
 
-`GET /api/v1/ready` reports API readiness separately. No database or external AI
-dependencies are initialized or checked in this milestone.
+`GET /api/v1/ready` reports API readiness separately. The application creates
+and disposes its SQLAlchemy engine with the FastAPI lifespan; connections are
+opened when a database session is used.
 
 ## Checks
 

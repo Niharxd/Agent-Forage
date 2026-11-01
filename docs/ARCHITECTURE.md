@@ -126,12 +126,21 @@ sequenceDiagram
 ## Persistence model (logical)
 
 - **Execution:** ID, original task, state, plan/schema version, provider mode (not credential), timestamps, terminal reason, report.
-- **Workflow step:** execution ID, step ID, role, declared dependencies, validated input/output references, current state.
-- **Step attempt:** attempt number, start/end, result or sanitized error, provider/tool metadata, timeout/retry classification.
-- **Approval request:** execution/step, tool ID, canonical argument digest, safe display arguments, status, approver identity, decision time, expiry.
+- **Workflow:** named, versioned validated definition, stored as PostgreSQL JSONB.
+- **Workflow step attempt:** execution ID, stable task ID, role, attempt number, input/output JSONB, state, timing, sanitized error.
+- **Approval request:** execution/step, action digest, safe display arguments, status, decision time.
+- **Tool execution:** execution/step, registered tool name, state, safe input/output summaries, timing.
 - **Audit event:** append-only state changes, plan start, approval decisions, and tool invocation outcomes.
 
 Use SQLAlchemy 2.x and Alembic migrations. Store structured data as typed relational fields plus JSONB where appropriate; do not make an unvalidated JSON blob the sole state representation. Do not persist provider secrets. Apply retention and redaction policy before storing prompts/results that may contain sensitive user data.
+
+The initial SQLAlchemy schema is in `backend/app/agentforge/domain/models/`.
+It uses UUID primary keys, PostgreSQL JSONB for validated workflow and execution
+data, foreign keys with explicit delete behavior, and Alembic migrations.
+Execution records may be created before planning completes, so their workflow
+reference is nullable until a versioned workflow is available. The MVP's
+authentication mechanism remains unresolved; the initial users table stores
+only a unique email and does not store a password hash.
 
 ## API and worker boundary
 

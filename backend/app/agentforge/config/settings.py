@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
@@ -15,6 +16,8 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
     cors_origins: list[str] = Field(default_factory=list)
+    database_url: str = "postgresql+psycopg://localhost/agentforge"
+    test_database_url: str = "postgresql+psycopg://localhost/agentforge_test"
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",
@@ -53,3 +56,21 @@ class Settings(BaseSettings):
                 raise ValueError("CORS_ORIGINS contains an invalid port") from exc
             normalized_origins.append(origin.rstrip("/"))
         return normalized_origins
+
+    @field_validator("database_url", "test_database_url")
+    @classmethod
+    def validate_database_url(cls, value: str) -> str:
+        try:
+            url = make_url(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Database URLs must be valid PostgreSQL URLs") from exc
+        if url.drivername != "postgresql+psycopg" or not url.database:
+            raise ValueError("Database URLs must use PostgreSQL with the psycopg driver")
+        return value
+
+    @property
+    def runtime_database_url(self) -> str:
+        """Select an isolated database when the application is running in tests."""
+        if self.app_env.casefold() == "test":
+            return self.test_database_url
+        return self.database_url

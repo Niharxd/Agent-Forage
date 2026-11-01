@@ -1,0 +1,1 @@
+CREATE DATABASE agentforge_test OWNER CURRENT_USER;

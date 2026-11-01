@@ -1,6 +1,8 @@
 """FastAPI application entry point."""
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -14,6 +16,7 @@ from agentforge.api.errors import (
 )
 from agentforge.api.routes.health import router as health_router
 from agentforge.config.settings import Settings
+from agentforge.database.engine import create_database_engine, create_session_factory
 
 
 def configure_logging(log_level: str) -> None:
@@ -29,9 +32,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app_settings = settings or Settings()
     configure_logging(app_settings.log_level)
 
+    @asynccontextmanager
+    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        engine = create_database_engine(app_settings.runtime_database_url)
+        application.state.engine = engine
+        application.state.session_factory = create_session_factory(engine)
+        try:
+            yield
+        finally:
+            engine.dispose()
+
     application = FastAPI(
         title="AgentForge API",
         version="1.0.0",
+        lifespan=lifespan,
     )
     application.add_middleware(
         CORSMiddleware,
