@@ -27,10 +27,10 @@ flowchart LR
 |---|---|---|
 | React dashboard | Task entry, plan/graph display, start/approve/reject actions, history and logs | Provider credentials, workflow policy decisions, direct tool invocation |
 | FastAPI API | Request validation, operator-facing endpoints, auth boundary, service orchestration, response shaping | Agent prompts, DAG scheduling internals, arbitrary execution |
-| Pydantic contracts | Versioned request/plan/step/tool/result/state shapes and validation | Persistence or side effects |
+| Pydantic contracts | Versioned request/plan/step/tool/result/state shapes and validation, plus provider-neutral agent input/output contracts | Persistence or side effects |
 | Planner service | Convert task to proposed structured plan through provider interface | Executing plans or tools |
 | Workflow engine | Validate transitions and dependency readiness, schedule bounded attempts, persist progress | Provider-specific API details, tool implementations, generated code execution |
-| Agent roles | Produce bounded structured outputs for assigned step using only supplied context | Self-directed scheduling or direct registry bypass |
+| Agent roles | Implement the common typed interface and produce bounded structured outputs for assigned work using only supplied context | Self-directed scheduling, direct registry bypass, or provider-specific SDK behavior in domain contracts |
 | Tool registry/policy | Resolve registered tool, validate arguments, classify risk, enforce approval and idempotency policy | Allowing tools based solely on model output |
 | Provider adapters | Translate provider-neutral requests/results to mock or external LLM APIs | Workflow state, tool permissions, persistence |
 | Persistence/repositories | Store versioned plans, executions, attempts, approvals, and audit events | Deciding whether a plan is safe |
@@ -141,6 +141,23 @@ Execution records may be created before planning completes, so their workflow
 reference is nullable until a versioned workflow is available. The MVP's
 authentication mechanism remains unresolved; the initial users table stores
 only a unique email and does not store a password hash.
+
+## Agent contracts and Day 6 implementations
+
+Provider-neutral agent identity, input, output, execution-result, and error
+contracts live in `backend/app/agentforge/domain/agents/`. They use Pydantic
+validation and JSON-compatible structured data and do not depend on FastAPI,
+the persistence models, or provider SDKs. The common synchronous `Agent`
+interface exposes identity, supported capabilities, input validation, and an
+execution method returning the same `AgentExecutionResult` shape for each
+role. Failed executions preserve a categorized error in both the execution
+result and its output.
+
+The Planner produces a non-executable single-step draft; the Researcher only
+returns supplied information; the Analyst reports top-level JSON types; and
+the Reviewer performs literal criterion-presence checks. These deterministic
+mocks make no network calls and do not claim semantic analysis, real research,
+workflow validation, workflow execution, or agent-to-agent orchestration.
 
 ## API and worker boundary
 

@@ -106,3 +106,35 @@ python -m uv --directory backend run uvicorn agentforge.main:app --reload
 The API listens at `http://127.0.0.1:8000`. Configure secrets only in local
 environment variables or an untracked `.env`; never commit credentials or
 include them in logs.
+
+## Agent contracts (Day 6)
+
+Provider-neutral Pydantic contracts live in
+`app/agentforge/domain/agents/`; implementations live in
+`app/agentforge/agents/`. `AgentInput` carries a bounded task description,
+workflow context, supplied data, optional prior results, metadata, requested
+capabilities, and review criteria. `AgentIdentity` declares an agent's stable
+identifier, role, description, version, and supported capabilities.
+`AgentOutput` contains structured JSON-compatible result data, a summary,
+metadata, status, and a categorized error when it fails. `AgentExecutionResult`
+adds duration and optional token usage. These contracts do not depend on
+FastAPI, SQLAlchemy, or an LLM provider SDK.
+
+Each implementation exposes the same synchronous `Agent` interface:
+`identity`, `supported_capabilities`, `validate_input`, and `execute`.
+Invalid inputs, unsupported capabilities, implementation failures, and invalid
+outputs return a failed execution result with a stable error category.
+
+The four deterministic mocks have intentionally narrow responsibilities:
+
+- **Planner:** creates a single-step draft marked non-executable; it does not
+  validate or run a workflow.
+- **Researcher:** returns supplied information and prior results without
+  network access, external sources, or added findings.
+- **Analyst:** describes top-level JSON field types only; it does not infer
+  trends, validate domain meaning, or add external facts.
+- **Reviewer:** checks literal, case-insensitive criterion presence in supplied
+  material; it does not assess semantic correctness or quality.
+
+All mocks are deterministic and provider-free. They do not execute workflows,
+coordinate with one another, perform real research, or call external services.
