@@ -138,3 +138,58 @@ The four deterministic mocks have intentionally narrow responsibilities:
 
 All mocks are deterministic and provider-free. They do not execute workflows,
 coordinate with one another, perform real research, or call external services.
+
+## Deterministic workflow execution (Day 7)
+
+The in-memory `agentforge.workflow.WorkflowEngine` connects workflow tasks to
+the existing four agents through their provider-neutral synchronous `Agent`
+interface. A workflow contains declarative tasks with an ID, agent role,
+JSON input, optional description, review criteria, and dependency IDs. It
+contains no executable code.
+
+The engine validates the complete definition before execution: it requires at
+least one task, unique IDs, known agent roles and dependencies, no
+self/duplicate dependencies, an acyclic graph, and no more than 25 tasks.
+Callers can lower that limit by constructing
+`WorkflowValidator(max_tasks=...)`. Task input is limited to 10,000 serialized
+bytes. Invalid workflows raise `WorkflowValidationError` with structured
+issues and are never dispatched.
+
+Tasks execute sequentially in deterministic topological order, with task IDs
+breaking ties among ready tasks. A task receives only the successful outputs
+of its direct dependencies. On agent failure, the task is recorded as failed;
+its dependent tasks are blocked and independent tasks continue. Any failed or
+blocked task makes the workflow fail. The returned Pydantic execution result
+contains task statuses, agent results/errors, UTC lifecycle events, and
+completion timestamps.
+
+The engine uses deterministic Day 6 mock agents only. The Planner creates a
+non-executable draft, the Researcher only returns supplied information, the
+Analyst reports JSON field types, and the Reviewer checks literal criterion
+presence. No real LLM, tool, filesystem, shell, or internet integration is
+invoked. Execution state and events are currently in memory only: this
+milestone does not add API endpoints, database persistence, migrations,
+parallelism, retries, or worker infrastructure. Per-attempt timeout enforcement
+and restart recovery are also not implemented.
+
+Example:
+
+```python
+from agentforge.domain.agents import AgentRole
+from agentforge.domain.workflows import WorkflowDefinition, WorkflowTask
+from agentforge.workflow import WorkflowEngine
+
+definition = WorkflowDefinition(
+    name="inspect supplied data",
+    tasks=[
+        WorkflowTask(
+            task_id="inspect",
+            agent_type=AgentRole.ANALYST,
+            input_data={"count": 3, "labels": ["a", "b"]},
+            description="Describe the supplied data structure.",
+        )
+    ],
+)
+execution = WorkflowEngine().execute(definition)
+print(execution.status, execution.task_results["inspect"].agent_result.output.summary)
+```

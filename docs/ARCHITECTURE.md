@@ -38,7 +38,7 @@ flowchart LR
 
 ## Workflow representation
 
-A plan is versioned JSON validated with Pydantic. Each step has a stable ID, role (`researcher` or `analyst`), instruction, declared dependency IDs, typed input/output contract, and optional registered tool capability references. The Planner creates the plan and the Reviewer assesses the completed result; neither is a user-selectable execution-step role in the MVP. A step may produce at most one structured tool request, which the engine validates and dispatches; further tool actions must be represented by subsequent declared steps. The engine owns final validation and execution. Dependencies form a directed acyclic graph.
+A plan is versioned JSON validated with Pydantic. Each step has a stable ID, role (`researcher` or `analyst`), instruction, declared dependency IDs, typed input/output contract, and optional registered tool capability references. In the full MVP, the Planner creates the plan and the Reviewer assesses the completed result rather than serving as user-selectable execution-step roles. The Day 7 in-memory engine accepts all four existing roles for task dispatch to exercise the common contract; this does not make the mock Planner output executable or grant any agent tool access. A step may produce at most one structured tool request, which the engine validates and dispatches; further tool actions must be represented by subsequent declared steps. The engine owns final validation and execution. Dependencies form a directed acyclic graph.
 
 Plan validation includes:
 
@@ -208,3 +208,37 @@ Claim/lease duration, heartbeat, recovery, and idempotency rules must be explici
 The stated feature set is too broad for a single initial implementation milestone if it includes production-grade identity, arbitrary integrations, distributed scheduling, high availability, and a polished dashboard. This architecture narrows the first delivery to a single-operator vertical slice with mock provider/tools, sequential execution, durable status/history, and approval mechanics. The listed scale/performance target is a validation target, not a guarantee.
 
 Approval, persistence, and worker recovery interact: a database claim cannot establish whether a timed-out external effect occurred. The implementation must preserve an ambiguous/recovery-required outcome instead of promising exactly-once execution. Public or multi-user deployment remains out of scope until authentication, authorization, tenant isolation, secrets handling, retention, and operational recovery are specified and tested.
+
+## Day 7 deterministic workflow engine
+
+The synchronous `agentforge.workflow.WorkflowEngine` accepts a declarative
+Pydantic workflow definition and validates it before creating execution state.
+The validator rejects empty workflows, malformed or duplicate task IDs,
+invalid agent roles, duplicate/self/missing dependencies, cycles, and
+definitions above the configured task limit. The default limit is 25 tasks;
+callers may lower it with `WorkflowValidator(max_tasks=...)`, but cannot raise
+it above the product limit.
+
+Valid tasks are topologically ordered with task IDs as the stable tie-breaker
+among ready tasks. The engine invokes one registered agent at a time through
+the Day 6 synchronous `Agent` contract. Only successful results from a task's
+declared direct dependencies are supplied as prior results. Per-task input is
+JSON data (at most 10,000 serialized bytes), not code, and task descriptions
+remain bounded by the agent contract.
+
+Each task transitions through pending and running to completed or failed;
+dependents of failed or blocked tasks are marked blocked, while independent
+ready tasks continue. The workflow is failed if any task fails or is blocked.
+Agent results, structured errors, UTC lifecycle events, and final task states
+are returned in memory. Event fields map to the existing `ExecutionEvent`
+record (`event_type`, `from_status`, `to_status`, `reason`, `occurred_at`, and
+`details`); the task ID is included in details. This milestone does not persist
+these results or events and adds no API, worker, or migration.
+
+Execution is sequential and finite (at most 25 tasks), with no retries,
+parallelism, tools, generated-code execution, or recursive agent calls. The
+engine currently uses the existing deterministic mock agents only: the
+Researcher does not access the internet, the Analyst only describes JSON
+structure, the Reviewer only performs literal checks, and the Planner returns
+a non-executable draft. Provider calls, durable state/recovery, cancellation,
+and per-attempt timeout enforcement remain future work.
