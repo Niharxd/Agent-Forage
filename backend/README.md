@@ -172,6 +172,51 @@ milestone does not add API endpoints, database persistence, migrations,
 parallelism, retries, or worker infrastructure. Per-attempt timeout enforcement
 and restart recovery are also not implemented.
 
+## Execution reliability and state (Day 8)
+
+The engine applies explicit transitions and rejects invalid ones:
+
+- Workflow: `PENDING -> RUNNING | CANCELLED`; `RUNNING -> COMPLETED | FAILED | CANCELLED`.
+- Task: `PENDING -> RUNNING | BLOCKED | SKIPPED`; `RUNNING -> COMPLETED | FAILED`.
+- Terminal workflow/task states cannot be restarted. Failed tasks and dependency-blocked tasks remain distinct; independent tasks continue after failures.
+
+`WorkflowEngine.create_execution()` validates and returns a pending
+`WorkflowExecutionSnapshot` without invoking an agent. `run(execution_id)`
+executes that pending run; the existing `execute(definition)` remains the
+synchronous create-and-run convenience method. Snapshots contain the execution
+ID, workflow name, status, timestamps, task results/errors, structured events,
+and deterministic task start order. They are Pydantic models and serialize
+with `model_dump_json()`.
+
+Pending workflows can be cancelled immediately; their tasks are marked
+`SKIPPED`. Cancellation of a running workflow is cooperative and takes effect
+between tasks. A synchronous mock-agent call already in progress is allowed to
+return normally; its result is retained, no subsequent task starts, and the
+remaining pending tasks are skipped. The engine does not claim hard
+interruption of an active call.
+
+The engine loads limits from `Settings` and the matching environment variables:
+`WORKFLOW_MAX_TASKS` (25), `WORKFLOW_MAX_EXECUTION_STEPS` (25),
+`WORKFLOW_MAX_TASK_INPUT_BYTES` (10,000),
+`WORKFLOW_MAX_RESULT_BYTES` (100,000), and `WORKFLOW_HISTORY_SIZE` (100).
+The settings enforce safe upper bounds. Oversized task input is rejected before
+agent dispatch; an oversized result fails without being retained. Reaching the
+execution-step limit skips remaining runnable tasks and fails the workflow.
+
+Failed-task results retain the task ID, agent role, stable error category,
+safe user-facing message, and error timestamp. Raw exception text and failed
+agent payloads are not included in returned execution state. Developers still
+receive structured log context with IDs, agent role, category, and exception
+class.
+
+Terminal snapshots are kept in a bounded in-memory history. `get_execution(id)`
+returns a detached snapshot or raises `ExecutionNotFoundError`;
+`list_executions(limit=...)` returns recent terminal executions newest first.
+Returned snapshots cannot mutate stored history. History, active executions,
+and cancellation requests are process-local and are lost on restart. There
+are no Day 8 API endpoints, database writes/migrations, retries, worker
+coordination, or restart recovery.
+
 Example:
 
 ```python

@@ -1,5 +1,9 @@
 """Workflow validation and orchestration package."""
 
-from agentforge.workflow.engine import WorkflowEngine
+from agentforge.workflow.engine import (
+    ExecutionNotFoundError,
+    InvalidExecutionStateError,
+    WorkflowEngine,
+)
 
-__all__ = ["WorkflowEngine"]
+__all__ = ["ExecutionNotFoundError", "InvalidExecutionStateError", "WorkflowEngine"]

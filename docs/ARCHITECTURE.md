@@ -240,5 +240,58 @@ parallelism, tools, generated-code execution, or recursive agent calls. The
 engine currently uses the existing deterministic mock agents only: the
 Researcher does not access the internet, the Analyst only describes JSON
 structure, the Reviewer only performs literal checks, and the Planner returns
-a non-executable draft. Provider calls, durable state/recovery, cancellation,
-and per-attempt timeout enforcement remain future work.
+a non-executable draft. Day 8 adds in-process snapshots, cancellation between
+tasks, and bounded history; durable state/recovery and per-attempt timeout
+enforcement remain future work.
+
+## Day 8 execution reliability and state
+
+The in-memory engine owns explicit status transitions. Workflows permit
+`pending → running|cancelled` and `running → completed|failed|cancelled`;
+terminal workflow states have no outgoing transitions. Tasks permit
+`pending → running|blocked|skipped` and `running → completed|failed`.
+Completed, failed, blocked, and skipped task states are terminal. Invalid
+transitions raise `WorkflowStateTransitionError`; the engine applies changes
+through these transition methods rather than assigning statuses directly.
+Failed tasks remain distinct from dependency-blocked tasks, and independent
+ready tasks continue after a task failure.
+
+`WorkflowExecutionSnapshot` is a Pydantic, JSON-serializable view of the
+execution ID/name/status, creation/start/completion timestamps, per-task
+status/results/errors, structured events, cancellation-request flag, and
+actual task start order. `create_execution` validates and returns a pending
+snapshot without dispatch. `run` starts a pending execution; `execute` keeps
+the Day 7 convenience behavior of creating and running synchronously.
+Snapshots returned by history APIs are detached copies.
+
+Cancellation of a pending execution immediately changes it to `cancelled`
+and marks all its tasks `skipped`. A running cancellation is cooperative:
+`cancel` records a cancellation-request event, but does not interrupt an
+already-running synchronous agent call. Once that call returns, the engine
+preserves its result, skips tasks not yet started, and records the terminal
+cancellation event. This is not hard interruption or process-level
+cancellation.
+
+Limits are loaded from `Settings` (environment variables use the
+`WORKFLOW_` prefix): 25 tasks, 25 agent execution steps, 10,000 serialized
+input bytes per task, 100,000 serialized result bytes per task, and 100
+terminal snapshots in history by default. Task count and input limits may be
+lowered; all limits have bounded configuration ranges. Excessive input is
+rejected during validation before dispatch. A result over the configured
+limit fails its task without retaining that result. If the step limit is
+reached, remaining runnable tasks are skipped and the workflow fails.
+
+Task error messages exposed in execution state are safe, category-specific
+messages; raw exception messages and failed agent payloads are not retained.
+Logs include execution/task IDs, agent type, error category, and exception
+class where applicable, but not exception text. Each task error records its
+category, occurrence timestamp, task ID, and agent type through its task
+result.
+
+`WorkflowEngine` stores active executions and terminal snapshots in process
+memory only. `get_execution` returns a snapshot by ID and raises
+`ExecutionNotFoundError` when absent; `list_executions` returns most-recent
+terminal snapshots first. The configured history capacity evicts the oldest
+terminal snapshot. No API endpoints, database persistence/migrations,
+distributed workers, retries, or restart recovery are added in this
+milestone. Active work and history are lost when the process exits.

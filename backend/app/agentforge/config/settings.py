@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     cors_origins: list[str] = Field(default_factory=list)
     database_url: str = "postgresql+psycopg://localhost/agentforge"
     test_database_url: str = "postgresql+psycopg://localhost/agentforge_test"
+    workflow_max_tasks: int = Field(default=25, ge=1, le=25)
+    workflow_max_execution_steps: int = Field(default=25, ge=1, le=25)
+    workflow_max_task_input_bytes: int = Field(default=10_000, ge=1, le=10_000)
+    workflow_max_result_bytes: int = Field(default=100_000, ge=1, le=1_000_000)
+    workflow_history_size: int = Field(default=100, ge=1, le=10_000)
 
     model_config = SettingsConfigDict(
         env_file=PROJECT_ROOT / ".env",

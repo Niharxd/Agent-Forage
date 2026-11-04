@@ -1,13 +1,18 @@
 """Workflow structure checks and deterministic dependency ordering."""
 
 import heapq
+import json
 from collections import defaultdict
 from collections.abc import Mapping
 from typing import TypeAlias
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from agentforge.domain.workflows.models import WorkflowDefinition, WorkflowTask
+from agentforge.domain.workflows.models import (
+    MAX_TASK_INPUT_BYTES,
+    WorkflowDefinition,
+    WorkflowTask,
+)
 
 DEFAULT_MAX_WORKFLOW_TASKS = 25
 WorkflowDefinitionInput: TypeAlias = WorkflowDefinition | Mapping[str, object]
@@ -42,10 +47,17 @@ class WorkflowValidationError(ValueError):
 class WorkflowValidator:
     """Validate workflow bounds and DAG structure before execution."""
 
-    def __init__(self, max_tasks: int = DEFAULT_MAX_WORKFLOW_TASKS) -> None:
+    def __init__(
+        self,
+        max_tasks: int = DEFAULT_MAX_WORKFLOW_TASKS,
+        max_task_input_bytes: int = MAX_TASK_INPUT_BYTES,
+    ) -> None:
         if not 1 <= max_tasks <= DEFAULT_MAX_WORKFLOW_TASKS:
             raise ValueError(f"max_tasks must be between 1 and {DEFAULT_MAX_WORKFLOW_TASKS}")
+        if not 1 <= max_task_input_bytes <= MAX_TASK_INPUT_BYTES:
+            raise ValueError(f"max_task_input_bytes must be between 1 and {MAX_TASK_INPUT_BYTES}")
         self.max_tasks = max_tasks
+        self.max_task_input_bytes = max_task_input_bytes
 
     def validate(self, definition: WorkflowDefinitionInput) -> WorkflowDefinition:
         """Parse and validate a workflow, raising structured errors on invalid input."""
@@ -63,6 +75,27 @@ class WorkflowValidator:
                     location=("tasks",),
                 )
             )
+
+        for index, task in enumerate(workflow.tasks):
+            input_size = len(
+                json.dumps(
+                    task.input_data,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            if input_size > self.max_task_input_bytes:
+                issues.append(
+                    WorkflowValidationIssue(
+                        code="task_input_limit",
+                        message=(
+                            f"Task {task.task_id!r} input is {input_size} bytes; "
+                            f"the maximum is {self.max_task_input_bytes}."
+                        ),
+                        task_id=task.task_id,
+                        location=("tasks", index, "input_data"),
+                    )
+                )
 
         task_ids = {task.task_id for task in workflow.tasks}
         seen_task_ids: set[str] = set()
