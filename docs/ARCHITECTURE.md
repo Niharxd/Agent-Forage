@@ -244,6 +244,33 @@ a non-executable draft. Day 8 adds in-process snapshots, cancellation between
 tasks, and bounded history; durable state/recovery and per-attempt timeout
 enforcement remain future work.
 
+## Day 9 tool registry and safe execution
+
+Day 9 adds a small provider-neutral tool layer in `agentforge.tools` that is
+independent of FastAPI, database persistence, and the workflow engine. The
+definition contract includes a unique tool ID, name, version, description,
+input/output schema, required capabilities, enabled flag, size limits, and
+trusted handler reference. The registry is in-memory and deny-by-default: it
+rejects duplicate IDs/names, exposes read-only snapshots of registered tools,
+and filters tools by declared capability before returning them to callers.
+
+The executor validates requests before dispatch: it checks registry existence,
+`enabled` state, required capabilities, typed input, schema compliance, and
+configured input/output byte limits. It then invokes only the explicitly
+registered callable handler for the tool. It never imports modules dynamically,
+never executes arbitrary Python strings, and does not allow shell execution or
+unrestricted filesystem/network access. This makes the tool layer deterministic,
+bounded, and audit-friendly without redesigning the existing workflow engine.
+
+The result model is compatible with the existing durable execution records:
+it includes the tool ID/name/version, agent identity, workflow/task context,
+execution status, timestamps, duration, safe structured error, and metadata. A
+runtime event can safely capture the same fields in `ExecutionEvent.details`
+without introducing migrations. Where the tool execution limits are configured,
+the executor checks elapsed time after the handler returns; true hard timeouts
+for arbitrary synchronous Python call stacks require worker or process
+isolation and are not safe to approximate with thread-level interruption.
+
 ## Day 8 execution reliability and state
 
 The in-memory engine owns explicit status transitions. Workflows permit

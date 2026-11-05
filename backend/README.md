@@ -172,6 +172,35 @@ milestone does not add API endpoints, database persistence, migrations,
 parallelism, retries, or worker infrastructure. Per-attempt timeout enforcement
 and restart recovery are also not implemented.
 
+## Tool registry and safe execution (Day 9)
+
+The backend ships a provider-neutral `agentforge.tools` package for explicit,
+permissioned tool execution. The package contains:
+
+- `ToolDefinition`, `ToolInput`, `ToolOutput`, `ToolExecutionRequest`,
+  `ToolExecutionResult`, `ToolExecutionStatus`, and `ToolExecutionError`.
+- `ToolRegistry` for in-memory registration, lookup, capability filtering, and
+  enable/disable policy.
+- `ToolExecutor` for permission checks, schema validation, trusted handler
+  invocation, and safe result/error reporting.
+- A default registry with three deterministic safe tools: `text_analysis`,
+  `json_inspection`, and `calculator`.
+
+The executor accepts an explicit `agent_id` and explicit capability context, not
+just a free-form tool name. A handler must already be registered in trusted
+application code; the tool system never imports arbitrary modules or executes
+Python, shell, or SQL from untrusted strings. Calls are denied when the tool is
+missing, disabled, or outside an agent's declared capability set. Results must
+match the declared output schema and remain within the configured byte limits.
+
+This is a deny-by-default policy layer. The executor will not run a tool whose
+handler is missing, non-callable, or not in the registry. It records a safe,
+structured failure rather than disclosing internal exceptions. Hard timeout
+cancellation of a synchronous Python handler is not safe without process or
+worker isolation: the executor can only enforce configured limits after a
+handler returns and must fail closed when the measured execution exceeds the
+configured budget.
+
 ## Execution reliability and state (Day 8)
 
 The engine applies explicit transitions and rejects invalid ones:

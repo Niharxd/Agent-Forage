@@ -46,10 +46,15 @@ This model covers task submission, LLM-based planning and role execution, tool p
 1. No workflow field is interpreted as Python, shell, SQL, JavaScript, or another executable program.
 2. Unknown tools, invalid arguments, invalid approvals, and unavailable persistence fail closed; they must not fall through to a permissive default.
 3. Gated tools have zero invocations until valid approval is committed and rechecked.
-4. Logs and API responses never include configured credential values; tests use sentinel secrets to verify redaction.
-5. State-changing endpoints require the configured operator authorization in any deployment beyond local-only development.
-6. Persisted user/model content has documented access, retention, deletion, and provider-sharing rules before handling sensitive production data.
-7. Build/runtime containers run as non-root where supported and do not receive host execution privileges.
+4. Tool handlers are explicit callables registered in trusted application code; the runtime does not dynamically import modules or load arbitrary handlers from untrusted inputs.
+5. Logs and API responses never include configured credential values; tests use sentinel secrets to verify redaction.
+6. State-changing endpoints require the configured operator authorization in any deployment beyond local-only development.
+7. Persisted user/model content has documented access, retention, deletion, and provider-sharing rules before handling sensitive production data.
+8. Build/runtime containers run as non-root where supported and do not receive host execution privileges.
+
+## Day 9 tool-safety note
+
+The Day 9 tool registry intentionally excludes arbitrary shell execution, filesystem access, network access, code evaluation, and dynamic imports. The single-operator MVP still relies on trustworthy application code for the registered handlers, and hard process-level timeouts are not enforced for arbitrary synchronous Python handlers without operating-system-level isolation. The Safe tool layer therefore enforces deny-by-default registration, explicit agent capabilities, schema validation, and safe failure reporting while leaving full external side-effect isolation to later milestones.
 
 ## Residual risks and out of scope
 
