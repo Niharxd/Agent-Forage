@@ -156,6 +156,55 @@ def test_executor_validates_output_and_size_limits() -> None:
     assert size_result.error is not None and size_result.error.code == "invalid_input"
 
 
+def test_executor_does_not_expose_raw_handler_exception_text() -> None:
+    def failing_handler(payload: object) -> dict[str, object]:
+        raise ValueError("sentinel-private-diagnostic")
+
+    tool = ToolDefinition(
+        tool_id="failing_tool",
+        name="failing_tool",
+        description="Raises a private diagnostic for this test.",
+        handler=failing_handler,
+    )
+    result = ToolExecutor(ToolRegistry([tool])).execute(
+        ToolExecutionRequest(
+            tool_id="failing_tool",
+            agent_id="analyst-1",
+            arguments={},
+            agent_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+        )
+    )
+
+    assert result.status == ToolExecutionStatus.FAILED
+    assert result.error is not None
+    assert result.error.details == {}
+    assert "sentinel-private-diagnostic" not in result.model_dump_json()
+
+
+def test_executor_enforces_size_limits_without_declared_schemas() -> None:
+    calls = []
+    tool = ToolDefinition(
+        tool_id="schema_less_tool",
+        name="schema_less_tool",
+        description="Has explicit size limits without JSON schemas.",
+        input_size_limit=8,
+        handler=lambda payload: calls.append(payload) or {"ok": True},
+    )
+
+    result = ToolExecutor(ToolRegistry([tool])).execute(
+        ToolExecutionRequest(
+            tool_id="schema_less_tool",
+            agent_id="analyst-1",
+            arguments={"value": "too-large"},
+            agent_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+        )
+    )
+
+    assert result.status == ToolExecutionStatus.FAILED
+    assert result.error is not None and result.error.code == "invalid_input"
+    assert calls == []
+
+
 def test_tool_execution_result_is_compatible_with_execution_event_records() -> None:
     result = ToolExecutionResult(
         tool_id="calculator",

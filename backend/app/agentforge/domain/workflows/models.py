@@ -15,6 +15,7 @@ from agentforge.domain.agents.contracts import (
     JsonObject,
     JsonValue,
 )
+from agentforge.tools.contracts import ToolExecutionResult, ToolExecutionStatus
 
 MAX_TASK_INPUT_BYTES = 10_000
 
@@ -64,6 +65,16 @@ class WorkflowEventType(StrEnum):
     WORKFLOW_CANCELLED = "workflow_cancelled"
     TASK_SKIPPED = "task_skipped"
     EXECUTION_LIMIT_REACHED = "execution_limit_reached"
+    TASK_TOOL_EXECUTION_STARTED = "task_tool_execution_started"
+    TASK_TOOL_EXECUTION_COMPLETED = "task_tool_execution_completed"
+    TASK_TOOL_EXECUTION_FAILED = "task_tool_execution_failed"
+
+
+class WorkflowToolRequest(WorkflowContract):
+    """One explicitly declared, bounded tool invocation for a workflow task."""
+
+    tool_id: str = Field(min_length=1, max_length=64)
+    arguments: JsonValue = Field(default_factory=dict)
 
 
 class WorkflowTask(WorkflowContract):
@@ -75,6 +86,7 @@ class WorkflowTask(WorkflowContract):
     dependency_ids: list[str] = Field(default_factory=list, max_length=25)
     description: str | None = Field(default=None, max_length=10_000)
     review_criteria: list[str] = Field(default_factory=list, max_length=100)
+    tool_request: WorkflowToolRequest | None = None
 
     @field_validator("input_data")
     @classmethod
@@ -125,6 +137,7 @@ class TaskExecutionResult(WorkflowContract):
     agent_type: AgentRole
     status: TaskStatus
     agent_result: AgentExecutionResult | None = None
+    tool_result: ToolExecutionResult | None = None
     error: WorkflowTaskError | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None
@@ -270,12 +283,20 @@ class WorkflowExecutionSnapshot(WorkflowContract):
             if result.status == TaskStatus.PENDING:
                 if result.started_at is not None or result.completed_at is not None:
                     raise ValueError("pending task snapshots cannot have timestamps")
-                if result.agent_result is not None or result.error is not None:
+                if (
+                    result.agent_result is not None
+                    or result.tool_result is not None
+                    or result.error is not None
+                ):
                     raise ValueError("pending task snapshots cannot contain results or errors")
             elif result.status == TaskStatus.RUNNING:
                 if result.started_at is None or result.completed_at is not None:
                     raise ValueError("running task snapshots require only a start timestamp")
-                if result.agent_result is not None or result.error is not None:
+                if (
+                    result.agent_result is not None
+                    or result.tool_result is not None
+                    or result.error is not None
+                ):
                     raise ValueError("running task snapshots cannot contain results or errors")
             elif result.status == TaskStatus.COMPLETED:
                 if result.started_at is None or result.completed_at is None:
@@ -286,6 +307,11 @@ class WorkflowExecutionSnapshot(WorkflowContract):
                     or result.error is not None
                 ):
                     raise ValueError("completed task snapshots require a successful result")
+                if (
+                    result.tool_result is not None
+                    and result.tool_result.status != ToolExecutionStatus.SUCCEEDED
+                ):
+                    raise ValueError("completed task snapshots require successful tool results")
             elif result.status == TaskStatus.FAILED:
                 if result.completed_at is None or result.error is None:
                     raise ValueError("failed task snapshots require an error and completion time")

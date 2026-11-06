@@ -33,7 +33,15 @@ from agentforge.domain.workflows.models import (
 )
 from agentforge.domain.workflows.validation import (
     WorkflowDefinitionInput,
+    WorkflowValidationError,
+    WorkflowValidationIssue,
     WorkflowValidator,
+)
+from agentforge.tools import (
+    ToolExecutionRequest,
+    ToolExecutionResult,
+    ToolExecutionStatus,
+    ToolExecutor,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,6 +80,7 @@ class WorkflowEngine:
         *,
         validator: WorkflowValidator | None = None,
         settings: Settings | None = None,
+        tool_executor: ToolExecutor | None = None,
     ) -> None:
         settings = settings or Settings()
         self._agents = dict(agents) if agents is not None else self._mock_agents()
@@ -82,6 +91,7 @@ class WorkflowEngine:
         self._max_execution_steps = settings.workflow_max_execution_steps
         self._max_result_bytes = settings.workflow_max_result_bytes
         self._max_history_size = settings.workflow_history_size
+        self._tool_executor = tool_executor or ToolExecutor()
         if set(self._agents) != set(AgentRole):
             raise ValueError("The agent registry must include all four supported roles.")
         for role, agent in self._agents.items():
@@ -103,6 +113,35 @@ class WorkflowEngine:
     ) -> WorkflowExecutionSnapshot:
         """Validate and register a pending execution without dispatching an agent."""
         workflow, _ = self._validator.validate_and_order(definition)
+        tool_issues: list[WorkflowValidationIssue] = []
+        for task in workflow.tasks:
+            if task.tool_request is None:
+                continue
+            agent = self._agents[task.agent_type]
+            request = ToolExecutionRequest(
+                tool_id=task.tool_request.tool_id,
+                agent_id=agent.identity.agent_id,
+                arguments=task.tool_request.arguments,
+                agent_capabilities=agent.supported_capabilities,
+            )
+            try:
+                self._tool_executor.validate_request(
+                    request,
+                    agent_capabilities=agent.supported_capabilities,
+                )
+            except (TypeError, ValueError):
+                tool_issues.append(
+                    WorkflowValidationIssue(
+                        code="unsafe_tool_request",
+                        message=(
+                            f"Task {task.task_id!r} has an invalid or unauthorized tool request."
+                        ),
+                        task_id=task.task_id,
+                        location=("tasks", task.task_id, "tool_request"),
+                    )
+                )
+        if tool_issues:
+            raise WorkflowValidationError(tool_issues)
         execution = WorkflowExecution(
             execution_id=execution_id or uuid4(),
             workflow=workflow,
@@ -424,10 +463,95 @@ class WorkflowEngine:
             )
             return
 
+        safe_tool_result = None
+        if task.tool_request is not None:
+            agent = self._agents[task.agent_type]
+            request = ToolExecutionRequest(
+                tool_id=task.tool_request.tool_id,
+                agent_id=agent.identity.agent_id,
+                arguments=task.tool_request.arguments,
+                agent_capabilities=agent.supported_capabilities,
+                execution_id=str(execution.execution_id),
+                workflow_execution_id=str(execution.execution_id),
+                task_id=task.task_id,
+            )
+            with self._lock:
+                execution.events.append(
+                    WorkflowEvent(
+                        event_type=WorkflowEventType.TASK_TOOL_EXECUTION_STARTED,
+                        execution_id=execution.execution_id,
+                        task_id=task.task_id,
+                        timestamp=self._now(),
+                        metadata={"tool_id": task.tool_request.tool_id},
+                    )
+                )
+            tool_result = self._tool_executor.execute(
+                request,
+                agent_capabilities=agent.supported_capabilities,
+            )
+            safe_tool_result = self._safe_tool_result(tool_result)
+            succeeded = tool_result.status == ToolExecutionStatus.SUCCEEDED
+            with self._lock:
+                execution.events.append(
+                    WorkflowEvent(
+                        event_type=(
+                            WorkflowEventType.TASK_TOOL_EXECUTION_COMPLETED
+                            if succeeded
+                            else WorkflowEventType.TASK_TOOL_EXECUTION_FAILED
+                        ),
+                        execution_id=execution.execution_id,
+                        task_id=task.task_id,
+                        timestamp=self._now(),
+                        reason=(
+                            None if succeeded else "The requested tool could not complete safely."
+                        ),
+                        metadata={
+                            "tool_id": task.tool_request.tool_id,
+                            "status": tool_result.status.value,
+                        },
+                    )
+                )
+            if not succeeded:
+                error_code = (
+                    tool_result.error.code
+                    if tool_result.error is not None
+                    else "tool_execution_failed"
+                )
+                self._fail_task(
+                    execution,
+                    task,
+                    code=f"tool_{error_code}",
+                    message="The requested tool could not complete safely.",
+                    details={"tool_error_code": error_code},
+                    agent_result=agent_result,
+                    tool_result=safe_tool_result,
+                )
+                return
+
+        if task.agent_type == AgentRole.REVIEWER:
+            verdict = agent_result.output.result_data.get("verdict")
+            if verdict != "passed":
+                code = "review_not_evaluated" if verdict == "not_evaluated" else "review_rejected"
+                self._fail_task(
+                    execution,
+                    task,
+                    code=code,
+                    message=(
+                        "The reviewer did not evaluate the result."
+                        if verdict == "not_evaluated"
+                        else "The reviewer did not approve the result."
+                    ),
+                    details={"review_verdict": str(verdict or "invalid")},
+                    agent_result=agent_result,
+                    tool_result=safe_tool_result,
+                )
+                return
+
         with self._lock:
             result = execution.task_results[task.task_id]
             completed_at = self._now()
             result.agent_result = agent_result
+            result.tool_result = safe_tool_result
             result.completed_at = completed_at
             result.transition_to(TaskStatus.COMPLETED)
             execution.events.append(
@@ -471,6 +595,8 @@ class WorkflowEngine:
         code: str,
         message: str,
         details: dict[str, str | int] | None = None,
+        agent_result: AgentExecutionResult | None = None,
+        tool_result: ToolExecutionResult | None = None,
     ) -> None:
         with self._lock:
             result = execution.task_results[task.task_id]
@@ -481,6 +607,8 @@ class WorkflowEngine:
                 details=details or {},
                 occurred_at=failed_at,
             )
+            result.agent_result = agent_result
+            result.tool_result = tool_result
             result.completed_at = failed_at
             result.transition_to(TaskStatus.FAILED)
             execution.events.append(
@@ -617,6 +745,12 @@ class WorkflowEngine:
                     status=AgentExecutionStatus.SUCCEEDED,
                     result_data=dependency_agent_result.output.result_data,
                     summary=dependency_agent_result.output.summary,
+                    tool_output=(
+                        dependency_result.tool_result.output.output
+                        if dependency_result.tool_result is not None
+                        and dependency_result.tool_result.output is not None
+                        else None
+                    ),
                 )
             )
 
@@ -640,6 +774,13 @@ class WorkflowEngine:
             separators=(",", ":"),
         ).encode("utf-8")
         return len(encoded)
+
+    @staticmethod
+    def _safe_tool_result(result: ToolExecutionResult) -> ToolExecutionResult:
+        safe_result = result.model_copy(deep=True)
+        if safe_result.error is not None:
+            safe_result.error.details = {}
+        return safe_result
 
     @staticmethod
     def _input_size(agent_input: AgentInput) -> int:

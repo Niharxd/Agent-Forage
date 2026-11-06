@@ -265,7 +265,12 @@ def test_engine_runs_all_four_registered_mock_agents() -> None:
         task("planner", "planner"),
         task("researcher", "researcher"),
         task("analyst", "analyst"),
-        task("reviewer", "reviewer", review_criteria=["marker"]),
+        task(
+            "reviewer",
+            "reviewer",
+            review_criteria=["marker"],
+            input_data={"marker": True},
+        ),
     )
 
     result = WorkflowEngine().execute(definition)

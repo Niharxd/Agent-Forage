@@ -107,7 +107,7 @@ class ToolExecutor:
         try:
             validated_input = ToolInput.model_validate({"arguments": execution_request.arguments})
             self._validate_against_schema(tool, validated_input.arguments, is_input=True)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError):
             return self._result(
                 execution_request,
                 ToolExecutionStatus.FAILED,
@@ -115,7 +115,6 @@ class ToolExecutor:
                 ToolExecutionError(
                     code="invalid_input",
                     message="The tool rejected the supplied input.",
-                    details={"reason": str(exc)},
                 ),
             )
 
@@ -152,7 +151,6 @@ class ToolExecutor:
                         details={
                             "limit_ms": self._execution_timeout_ms(tool),
                             "actual_ms": max(0, round((perf_counter() - started_at) * 1000)),
-                            "reason": str(exc),
                         },
                     ),
                 )
@@ -163,7 +161,6 @@ class ToolExecutor:
                 ToolExecutionError(
                     code="invalid_output",
                     message="The tool returned an invalid result.",
-                    details={"reason": str(exc)},
                 ),
             )
 
@@ -175,15 +172,13 @@ class ToolExecutor:
         is_input: bool,
     ) -> None:
         schema = tool.input_schema if is_input else tool.output_schema
-        if not schema:
-            return
-        if self._payload_size(payload) > (
-            tool.input_size_limit if is_input else tool.output_size_limit
-        ):
-            limit = tool.input_size_limit if is_input else tool.output_size_limit
+        limit = tool.input_size_limit if is_input else tool.output_size_limit
+        if self._payload_size(payload) > limit:
             raise ValueError(
                 f"Tool {'input' if is_input else 'output'} exceeds the {limit} byte limit."
             )
+        if not schema:
+            return
         if schema.get("type") == "object":
             if not isinstance(payload, dict):
                 raise ValueError("Expected an object payload.")
@@ -281,6 +276,32 @@ class ToolExecutor:
             },
         )
         return result
+
+    def validate_request(
+        self,
+        request: ToolExecutionRequest | Mapping[str, object],
+        *,
+        agent_capabilities: Collection[AgentCapability | str] | None = None,
+    ) -> None:
+        """Reject an unsafe or malformed request without invoking its handler."""
+        execution_request = ToolExecutionRequest.model_validate(request)
+        if agent_capabilities is not None:
+            execution_request.agent_capabilities = frozenset(
+                AgentCapability(capability) for capability in agent_capabilities
+            )
+
+        tool = self.registry.get_by_id(execution_request.tool_id)
+        if tool is None or not tool.enabled or tool.handler is None or not callable(tool.handler):
+            raise ValueError("The requested tool is unavailable.")
+        missing_capabilities = set(tool.required_capabilities) - set(
+            execution_request.agent_capabilities
+        )
+        if missing_capabilities:
+            raise ValueError("The agent is not permitted to call this tool.")
+        validated_input = ToolInput.model_validate({"arguments": execution_request.arguments})
+        if self._payload_size(validated_input.arguments) > tool.input_size_limit:
+            raise ValueError("Tool input exceeds the configured size limit.")
+        self._validate_against_schema(tool, validated_input.arguments, is_input=True)
 
 
 __all__ = [

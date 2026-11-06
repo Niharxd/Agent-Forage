@@ -12,6 +12,7 @@ from agentforge.domain.workflows.models import (
     WorkflowStatus,
     WorkflowTask,
     WorkflowTaskError,
+    WorkflowToolRequest,
 )
 from agentforge.domain.workflows.validation import (
     DEFAULT_MAX_WORKFLOW_TASKS,
@@ -33,6 +34,7 @@ __all__ = [
     "WorkflowStateTransitionError",
     "WorkflowTask",
     "WorkflowTaskError",
+    "WorkflowToolRequest",
     "WorkflowValidationError",
     "WorkflowValidationIssue",
     "WorkflowValidator",

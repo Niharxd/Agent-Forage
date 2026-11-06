@@ -136,8 +136,9 @@ The four deterministic mocks have intentionally narrow responsibilities:
 - **Reviewer:** checks literal, case-insensitive criterion presence in supplied
   material; it does not assess semantic correctness or quality.
 
-All mocks are deterministic and provider-free. They do not execute workflows,
-coordinate with one another, perform real research, or call external services.
+All mocks are deterministic and provider-free. Planner drafts do not execute by
+themselves. `WorkflowOrchestrator` prepares a validated pending workflow from a
+Planner draft; execution still requires an explicit `start()` call.
 
 ## Deterministic workflow execution (Day 7)
 
@@ -166,11 +167,44 @@ completion timestamps.
 The engine uses deterministic Day 6 mock agents only. The Planner creates a
 non-executable draft, the Researcher only returns supplied information, the
 Analyst reports JSON field types, and the Reviewer checks literal criterion
-presence. No real LLM, tool, filesystem, shell, or internet integration is
-invoked. Execution state and events are currently in memory only: this
-milestone does not add API endpoints, database persistence, migrations,
-parallelism, retries, or worker infrastructure. Per-attempt timeout enforcement
-and restart recovery are also not implemented.
+presence. `WorkflowOrchestrator.prepare()` converts ordered Planner steps to a
+declarative workflow and registers it through the normal workflow validator.
+It returns a pending execution; call `start(execution_id)` to run it. Optional
+review criteria add a final Reviewer task. A `failed` or `not_evaluated`
+verdict makes the workflow fail rather than returning success.
+
+Workflow tasks may include one optional `tool_request` with a registered tool
+ID and JSON arguments. On preparation, the engine verifies tool registration,
+enablement, agent capabilities, schema, and input bounds without invoking the
+handler. On start, tools run only through `ToolExecutor`, using capabilities
+from the selected agent's identity. Successful tool output is supplied only to
+direct dependent tasks; denied or failed tool calls fail the task and block
+dependents. Planner output cannot declare tools. Tool failure results omit raw
+handler exception text.
+
+No real LLM, filesystem, shell, or internet integration is invoked. Execution
+state and events remain in memory. This integration does not add API endpoints,
+database persistence, migrations, parallelism, retries, worker infrastructure,
+or restart recovery. Tool execution is synchronous; elapsed-time limits are
+checked after a handler returns and cannot interrupt a stuck handler. The
+current tool contract has no risk-classification or approval/resume workflow,
+so this integration enforces registration, capability, schema, and size policy
+but does not claim approval gating for side effects.
+
+Example:
+
+```python
+from agentforge.workflow import WorkflowOrchestrator
+
+orchestrator = WorkflowOrchestrator()
+prepared = orchestrator.prepare(
+  "inspect the supplied labels",
+  input_data={"labels": ["alpha", "beta"]},
+  review_criteria=["observations"],
+)
+execution = orchestrator.start(prepared.execution.execution_id)
+print(execution.status)
+```
 
 ## Tool registry and safe execution (Day 9)
 

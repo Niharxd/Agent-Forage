@@ -5,5 +5,17 @@ from agentforge.workflow.engine import (
     InvalidExecutionStateError,
     WorkflowEngine,
 )
+from agentforge.workflow.orchestrator import (
+    PreparedWorkflow,
+    WorkflowOrchestrationError,
+    WorkflowOrchestrator,
+)
 
-__all__ = ["ExecutionNotFoundError", "InvalidExecutionStateError", "WorkflowEngine"]
+__all__ = [
+    "ExecutionNotFoundError",
+    "InvalidExecutionStateError",
+    "PreparedWorkflow",
+    "WorkflowEngine",
+    "WorkflowOrchestrationError",
+    "WorkflowOrchestrator",
+]

@@ -72,6 +72,7 @@ class PreviousAgentResult(AgentContract):
     status: AgentExecutionStatus
     result_data: JsonObject = Field(default_factory=dict)
     summary: str = Field(min_length=1, max_length=4000)
+    tool_output: JsonValue | None = None
 
 
 class AgentInput(AgentContract):
