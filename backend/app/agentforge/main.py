@@ -14,9 +14,13 @@ from agentforge.api.errors import (
     unhandled_exception_handler,
     validation_exception_handler,
 )
+from agentforge.api.middleware import RequestSizeLimitMiddleware
+from agentforge.api.routes.executions import router as executions_router
 from agentforge.api.routes.health import router as health_router
+from agentforge.api.routes.workflows import router as workflows_router
 from agentforge.config.settings import Settings
 from agentforge.database.engine import create_database_engine, create_session_factory
+from agentforge.workflow.engine import WorkflowEngine
 
 
 def configure_logging(log_level: str) -> None:
@@ -35,9 +39,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         engine = create_database_engine(app_settings.runtime_database_url)
-        application.state.engine = engine
-        application.state.session_factory = create_session_factory(engine)
         try:
+            application.state.engine = engine
+            application.state.session_factory = create_session_factory(engine)
+            application.state.workflow_engine = WorkflowEngine(settings=app_settings)
             yield
         finally:
             engine.dispose()
@@ -48,16 +53,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     application.add_middleware(
+        RequestSizeLimitMiddleware,
+        max_bytes=1_048_576,
+    )
+    application.add_middleware(
         CORSMiddleware,
         allow_origins=app_settings.cors_origins,
         allow_credentials=False,
-        allow_methods=["GET"],
+        allow_methods=["GET", "POST"],
         allow_headers=["*"],
     )
     application.add_exception_handler(StarletteHTTPException, http_exception_handler)
     application.add_exception_handler(RequestValidationError, validation_exception_handler)
     application.add_exception_handler(Exception, unhandled_exception_handler)
     application.include_router(health_router, prefix="/api/v1")
+    application.include_router(workflows_router, prefix="/api/v1")
+    application.include_router(executions_router, prefix="/api/v1")
     return application
 
 

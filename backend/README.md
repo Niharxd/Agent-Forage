@@ -97,6 +97,49 @@ inject a request-scoped SQLAlchemy `Session` with
 `agentforge.database.dependencies.get_db_session`; its transaction is rolled
 back when left uncommitted.
 
+## Workflow and execution REST API (Day 11)
+
+All routes are under `/api/v1`. Workflow request bodies contain `name`,
+optional `description`, and a `tasks` array using the domain workflow schema.
+Task IDs, agent roles, dependencies, task input bounds, workflow size, and
+registered-tool permissions are checked by the existing workflow engine and
+validator. Requests are limited to 1 MiB. API responses use Pydantic schemas;
+SQLAlchemy models and raw exception messages are not returned.
+
+| Method | Path | Behavior |
+|---|---|---|
+| `POST` | `/workflows` | Validate and persist a new workflow version. Returns its ID, definition, version, and timestamps. |
+| `GET` | `/workflows?limit=50&offset=0` | List persisted workflow versions. |
+| `GET` | `/workflows/{workflow_id}` | Retrieve one persisted workflow version. |
+| `POST` | `/workflows/validate` | Validate the definition and tool permissions without persisting it; returns `valid` and safe issue codes/locations. |
+| `POST` | `/workflows/{workflow_id}/executions` | Create a pending execution without invoking agents or tools. |
+| `POST` | `/executions/{execution_id}/start` | Explicitly run pending work through the existing orchestrator and workflow engine. |
+| `GET` | `/executions?limit=50&offset=0` | List active and retained terminal in-process executions. |
+| `GET` | `/executions/{execution_id}` | Return execution status, lifecycle events, task-level results, and execution order. |
+| `POST` | `/executions/{execution_id}/cancel` | Cancel pending work or request cooperative cancellation while running. |
+
+Workflow definitions are stored in the existing PostgreSQL `workflows` table.
+Creating another definition with the same name creates its next version under
+the existing unique `(name, version)` constraint. The API does not introduce
+another workflow or execution table.
+
+Execution records are **not currently persisted**: the existing synchronous
+engine retains active executions and bounded terminal history in process
+memory. Starting an execution blocks the HTTP request until the engine
+completes. A running cancellation request takes effect between synchronous
+agent/tool calls; it cannot interrupt a call already in progress. Restarting
+the API loses all active and terminal execution history. The `workflow_executions`,
+`execution_steps`, and `execution_events` SQLAlchemy models are not wired to
+the engine by this API, so this behavior is not durable and does not provide
+restart recovery. A separate worker, Redis, and distributed scheduling are
+not introduced.
+
+Invalid request/schema input returns `422`; missing workflow or execution IDs
+return `404`; invalid execution transitions return `409`; request bodies above
+1 MiB return `413`. Error responses use stable codes and omit raw Python
+exception messages. The API adds no authentication or authorization layer;
+keep the service on a trusted local interface.
+
 ## Run the API
 
 ```powershell

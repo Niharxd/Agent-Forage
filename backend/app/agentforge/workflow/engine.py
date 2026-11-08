@@ -23,6 +23,7 @@ from agentforge.domain.agents.interface import Agent
 from agentforge.domain.workflows.models import (
     TaskExecutionResult,
     TaskStatus,
+    WorkflowDefinition,
     WorkflowEvent,
     WorkflowEventType,
     WorkflowExecution,
@@ -112,6 +113,27 @@ class WorkflowEngine:
         execution_id: UUID | None = None,
     ) -> WorkflowExecutionSnapshot:
         """Validate and register a pending execution without dispatching an agent."""
+        workflow = self.validate_definition(definition)
+        execution = WorkflowExecution(
+            execution_id=execution_id or uuid4(),
+            workflow=workflow,
+            task_results={
+                task.task_id: TaskExecutionResult(
+                    task_id=task.task_id,
+                    agent_type=task.agent_type,
+                    status=TaskStatus.PENDING,
+                )
+                for task in workflow.tasks
+            },
+        )
+        with self._lock:
+            if execution.execution_id in self._active or execution.execution_id in self._history:
+                raise ValueError(f"Execution ID {execution.execution_id} is already in use.")
+            self._active[execution.execution_id] = execution
+            return execution.snapshot()
+
+    def validate_definition(self, definition: WorkflowDefinitionInput) -> WorkflowDefinition:
+        """Validate workflow structure and tool permissions without registering an execution."""
         workflow, _ = self._validator.validate_and_order(definition)
         tool_issues: list[WorkflowValidationIssue] = []
         for task in workflow.tasks:
@@ -142,23 +164,7 @@ class WorkflowEngine:
                 )
         if tool_issues:
             raise WorkflowValidationError(tool_issues)
-        execution = WorkflowExecution(
-            execution_id=execution_id or uuid4(),
-            workflow=workflow,
-            task_results={
-                task.task_id: TaskExecutionResult(
-                    task_id=task.task_id,
-                    agent_type=task.agent_type,
-                    status=TaskStatus.PENDING,
-                )
-                for task in workflow.tasks
-            },
-        )
-        with self._lock:
-            if execution.execution_id in self._active or execution.execution_id in self._history:
-                raise ValueError(f"Execution ID {execution.execution_id} is already in use.")
-            self._active[execution.execution_id] = execution
-            return execution.snapshot()
+        return workflow
 
     def execute(
         self,
@@ -338,6 +344,16 @@ class WorkflowEngine:
             snapshots = reversed(self._history.values())
             if limit is not None:
                 snapshots = list(snapshots)[:limit]
+            return [snapshot.model_copy(deep=True) for snapshot in snapshots]
+
+    def list_all_executions(self) -> list[WorkflowExecutionSnapshot]:
+        """List active and retained terminal snapshots, newest first."""
+        with self._lock:
+            snapshots = [
+                *(execution.snapshot() for execution in self._active.values()),
+                *self._history.values(),
+            ]
+            snapshots.sort(key=lambda snapshot: snapshot.created_at, reverse=True)
             return [snapshot.model_copy(deep=True) for snapshot in snapshots]
 
     def _active_execution(self, execution_id: UUID) -> WorkflowExecution:

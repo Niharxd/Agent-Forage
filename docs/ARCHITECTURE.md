@@ -161,9 +161,39 @@ workflow validation, workflow execution, or agent-to-agent orchestration.
 
 ## API and worker boundary
 
-The API handles submission, plan retrieval, explicit start/cancel, approval decisions, execution history, and health/readiness. Long-running work is performed outside request handlers by a single worker process using the same application services and engine. For the MVP, PostgreSQL can provide durable queued work and an atomic claim; a separate broker and multiple worker instances are deferred. API calls return execution IDs and clients poll for state rather than keeping long-lived requests open.
+The Day 11 API exposes versioned workflow definitions and the existing in-process execution engine:
 
-Claim/lease duration, heartbeat, recovery, and idempotency rules must be explicit and tested. A 15-minute active execution budget excludes time in `waiting_approval`; an approval request expires after 24 hours and expiry fails the execution without invoking the action.
+| Method | Path | Behavior |
+|---|---|---|
+| `POST` | `/api/v1/workflows` | Validate a definition and persist it as the next version for its name. |
+| `GET` | `/api/v1/workflows` | List persisted definitions with `limit` and `offset`. |
+| `GET` | `/api/v1/workflows/{workflow_id}` | Retrieve a persisted definition and version. |
+| `POST` | `/api/v1/workflows/validate` | Validate a definition and its declared tool permissions without persisting it. |
+| `POST` | `/api/v1/workflows/{workflow_id}/executions` | Create a pending in-memory execution; no agent or tool runs yet. |
+| `POST` | `/api/v1/executions/{execution_id}/start` | Start a pending execution synchronously through the orchestrator and engine. |
+| `GET` | `/api/v1/executions` | List active and retained terminal process-local executions. |
+| `GET` | `/api/v1/executions/{execution_id}` | Retrieve status, task results, events, and execution order. |
+| `POST` | `/api/v1/executions/{execution_id}/cancel` | Cancel pending work or request cooperative cancellation of running work. |
+
+Workflow definitions use the domain Pydantic contracts and validator; tool
+requests are preflighted through the engine's registered-tool and capability
+checks. Invalid definitions return `422`, missing resources return `404`, and
+invalid execution transitions return `409`. Request bodies are limited to
+1 MiB. Responses are explicit Pydantic API contracts, not SQLAlchemy objects,
+and error responses do not include raw exception details.
+
+Workflow definitions are persisted to PostgreSQL using the existing
+`workflows` model and `(name, version)` uniqueness convention. Execution state
+is currently held by the synchronous `WorkflowEngine` in process memory; it is
+not written to `workflow_executions`, `execution_steps`, or `execution_events`.
+The explicit start endpoint blocks until the synchronous run reaches a
+terminal state. Cancellation is cooperative and cannot interrupt an active
+synchronous agent or tool call. Execution history is bounded by the configured
+engine history limit and is lost on API process restart. These endpoints
+therefore do not provide durable execution, restart recovery, or a worker
+queue. A background worker, durable execution repository, and asynchronous
+HTTP lifecycle are deferred; the API does not claim that executions survive
+restarts.
 
 ## Failure handling
 
@@ -189,7 +219,7 @@ Claim/lease duration, heartbeat, recovery, and idempotency rules must be explici
 | AD-04 | Keep provider adapters behind a provider-neutral interface; use a deterministic mock by default in tests/dev. | Core orchestration does not depend on paid APIs or vendor-specific behavior. |
 | AD-05 | Tools are explicit registered adapters with typed schemas and deny-by-default policy. | LLM output cannot create new capabilities. Shell/exec tools are excluded. |
 | AD-06 | Gate sensitive/external side effects on approval bound to canonical action arguments. | Approval must not authorize a materially changed action. |
-| AD-07 | PostgreSQL is the source of truth; API and a single worker are separate runtime roles sharing services. | Durable history and bounded request lifetimes; multiple workers are deferred. |
+| AD-07 | PostgreSQL is the intended durable source of truth; Day 11 persists workflow definitions, while API execution state remains process-local until a durable engine integration is implemented. | Definition history is durable; execution history is not yet restart-safe, and worker infrastructure remains deferred. |
 | AD-08 | MVP targets one trusted operator on a local machine; private-network exposure requires an agreed authentication mechanism. | Avoids pretending minimal MVP controls meet SaaS isolation requirements. |
 | AD-09 | Initial limits: 25 steps, 2 retries, 60-second attempts, 15-minute active execution, 10,000-character task, 24-hour approval expiry, and one tool request per step. | Provides testable guardrails; operators can lower these limits. |
 

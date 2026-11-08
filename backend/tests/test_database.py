@@ -261,6 +261,31 @@ def test_fastapi_session_dependency_closes_request_session(
     assert engine.pool.checkedout() == 0
 
 
+def test_workflow_api_persists_versioned_definitions(migrated_database: Engine) -> None:
+    settings = Settings(app_env="test")
+    application = create_app(settings)
+    workflow_name = f"api-persistence-{uuid4().hex}"
+    payload = {
+        "name": workflow_name,
+        "description": "Persisted by the workflow API.",
+        "tasks": [{"task_id": "analyze", "agent_type": "analyst"}],
+    }
+
+    with TestClient(application) as client:
+        first = client.post("/api/v1/workflows", json=payload)
+        second = client.post("/api/v1/workflows", json=payload)
+        listed = client.get("/api/v1/workflows", params={"limit": 100})
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["version"] == 1
+    assert second.json()["version"] == 2
+    assert any(item["name"] == workflow_name for item in listed.json()["items"])
+    with Session(migrated_database) as session:
+        records = session.scalars(select(Workflow).where(Workflow.name == workflow_name)).all()
+        assert sorted(record.version for record in records) == [1, 2]
+
+
 def test_migration_metadata_matches_current_schema_and_supports_rollback(
     migrated_database: Engine,
 ) -> None:

@@ -17,6 +17,7 @@ _HTTP_ERROR_CODES = {
     404: ("not_found", "The requested resource was not found."),
     405: ("method_not_allowed", "The request method is not allowed."),
     409: ("conflict", "The request conflicts with the current resource state."),
+    413: ("request_too_large", "The request body exceeds the allowed size."),
     422: ("validation_error", "Request validation failed."),
 }
 
@@ -39,6 +40,17 @@ async def http_exception_handler(
     request: Request,
     exc: StarletteHTTPException,
 ) -> JSONResponse:
+    if isinstance(exc.detail, dict):
+        error = exc.detail.get("error")
+        if isinstance(error, dict) and error.get("code") in {
+            "workflow_validation_error",
+            "workflow_version_conflict",
+        }:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"error": error},
+                headers=exc.headers,
+            )
     code, message = _HTTP_ERROR_CODES.get(
         exc.status_code,
         ("request_error", "The request could not be processed."),
