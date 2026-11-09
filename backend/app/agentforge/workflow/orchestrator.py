@@ -22,7 +22,7 @@ from agentforge.domain.workflows.models import (
     WorkflowExecutionSnapshot,
     WorkflowTask,
 )
-from agentforge.workflow.engine import WorkflowEngine
+from agentforge.workflow.engine import ExecutionUpdateCallback, WorkflowEngine
 
 
 class WorkflowOrchestrationError(RuntimeError):
@@ -136,10 +136,20 @@ class WorkflowOrchestrator:
             execution=execution,
         )
 
-    def start(self, execution_id: UUID) -> WorkflowExecution:
+    def start(
+        self,
+        execution_id: UUID,
+        *,
+        on_update: ExecutionUpdateCallback | None = None,
+    ) -> WorkflowExecution:
         """Explicitly start a pending workflow through the bounded workflow engine."""
-        return self.engine.run(execution_id)
+        return self.engine.run(execution_id, on_update=on_update)
 
-    def cancel(self, execution_id: UUID) -> WorkflowExecutionSnapshot:
+    def cancel(
+        self,
+        execution_id: UUID,
+        *,
+        on_update: ExecutionUpdateCallback | None = None,
+    ) -> WorkflowExecutionSnapshot:
         """Delegate cancellation to the workflow engine's lifecycle controls."""
-        return self.engine.cancel(execution_id)
+        return self.engine.cancel(execution_id, on_update=on_update)

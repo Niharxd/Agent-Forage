@@ -29,12 +29,12 @@ flowchart LR
 | FastAPI API | Request validation, operator-facing endpoints, auth boundary, service orchestration, response shaping | Agent prompts, DAG scheduling internals, arbitrary execution |
 | Pydantic contracts | Versioned request/plan/step/tool/result/state shapes and validation, plus provider-neutral agent input/output contracts | Persistence or side effects |
 | Planner service | Convert task to proposed structured plan through provider interface | Executing plans or tools |
-| Workflow engine | Validate transitions and dependency readiness, schedule bounded attempts, persist progress | Provider-specific API details, tool implementations, generated code execution |
+| Workflow engine | Validate transitions and dependency readiness, schedule bounded sequential tasks, emit detached lifecycle snapshots | SQLAlchemy/database access, provider-specific API details, generated code execution |
 | Agent roles | Implement the common typed interface and produce bounded structured outputs for assigned work using only supplied context | Self-directed scheduling, direct registry bypass, or provider-specific SDK behavior in domain contracts |
 | Tool registry/policy | Resolve registered tool, validate arguments, classify risk, enforce approval and idempotency policy | Allowing tools based solely on model output |
 | Provider adapters | Translate provider-neutral requests/results to mock or external LLM APIs | Workflow state, tool permissions, persistence |
-| Persistence/repositories | Store versioned plans, executions, attempts, approvals, and audit events | Deciding whether a plan is safe |
-| Worker process | Claim and execute queued/resumable work through the same engine | Owning a separate state machine or bypassing API policy |
+| Persistence/repositories | Store versioned workflows, execution/task snapshots, and ordered audit events | Deciding whether a plan is safe or validating state transitions |
+| Synchronous API runner | Invoke the engine and commit each lifecycle snapshot before returning it as durable | Background scheduling, restart recovery, or exactly-once side effects |
 
 ## Workflow representation
 
@@ -55,29 +55,20 @@ The workflow engine executes sequentially in stable plan order among ready steps
 
 ```mermaid
 stateDiagram-v2
-    [*] --> submitted
-    submitted --> planning
-    planning --> planned
-    planning --> failed
-    planned --> queued: user starts
-    planned --> cancelled
-    queued --> running: worker claims execution
-    queued --> cancelled
-    running --> waiting_approval: gated action requested
-    waiting_approval --> running: approved
-    waiting_approval --> failed: rejected or expired
-    running --> succeeded: steps and reviewer pass
-    running --> failed: terminal error or limit reached
+    [*] --> pending
+    pending --> running: explicit start
+    pending --> cancelled
+    running --> completed: all tasks succeed
+    running --> failed: task failure or limit reached
     running --> cancelled: user cancels
-    submitted --> cancelled
-    succeeded --> [*]
+    completed --> [*]
     failed --> [*]
     cancelled --> [*]
 ```
 
-State transitions are validated centrally and persisted transactionally. A transition record includes execution, prior/new state, timestamp, actor or system source, and a reason code. Retries are represented as separate attempts for the same step, not as hidden state changes.
+State transitions are validated centrally by `WorkflowEngine`. The persistence adapter does not duplicate transition rules; each accepted engine snapshot and its newly appended events are committed together. A transition record includes execution, prior/new state, timestamp, system source, and a safe reason. The current engine does not retry tasks.
 
-**Restart behavior:** the MVP runs a single worker instance and uses a durable database claim to prevent duplicate active work. A lease expiring during an external side effect is ambiguous, not proof of non-execution. On recovery, safe read-only/idempotent work may be retried within limits; a non-idempotent action with unknown outcome is marked `failed` with a recovery-required reason for operator inspection. Exactly-once external effects are not promised. Multiple worker instances are deferred.
+**Restart behavior:** execution records, steps, results, timestamps, and ordered events survive API restarts and can be retrieved/listed from PostgreSQL. The in-memory engine does not rehydrate active executions, so a pending or interrupted execution cannot be started or resumed after restart; no recovery worker or durable claim is implemented. Exactly-once external effects are not promised.
 
 ## Data flow
 
@@ -86,39 +77,24 @@ sequenceDiagram
     actor User
     participant UI as Dashboard
     participant API as FastAPI
-    participant Planner
-    participant Provider
     participant DB as PostgreSQL
     participant Engine
     participant Policy as Tool policy/adapter
-    User->>UI: Submit task
+    User->>UI: Select a saved workflow
     UI->>API: Create execution
-    API->>DB: Persist submitted execution
-    API->>Planner: Plan task
-    Planner->>Provider: Structured planning request
-    Provider-->>Planner: Candidate plan
-    Planner-->>API: Candidate plan
-    API->>DB: Persist validated plan or planning error
-    API-->>UI: Execution and plan
+    API->>DB: Persist execution, pending tasks, and creation event (one transaction)
+    API-->>UI: Pending execution snapshot
     User->>UI: Start execution
     UI->>API: Start execution
-    API->>DB: Persist queued state
-    Engine->>DB: Claim queued execution and persist running
-    Engine->>DB: Claim next eligible step
-    Engine->>Provider: Execute role-specific step
+    Engine->>DB: Persist running state and workflow-started event
+    Engine->>DB: Persist each task transition, result, and event
+    Engine->>Engine: Execute role-specific mock agent
     opt Tool action
         Engine->>Policy: Validate registered capability and arguments
-        Engine->>DB: Persist approval request and waiting_approval state
-        UI->>API: Poll execution/approval state
-        API->>DB: Read persisted approval request
-        API-->>UI: Display exact action for approval
-        User->>API: Approve or reject exact request
-        API->>DB: Persist approval decision and actor
-        Engine->>Policy: Revalidate approval binding, then invoke if approved
+        Engine->>DB: Persist sanitized tool lifecycle event
+        Engine->>Policy: Invoke registered tool
     end
-    Engine->>DB: Persist attempt, transition, and output
-    Engine->>Provider: Review completed result
-    Engine->>DB: Persist terminal state and report
+    Engine->>DB: Persist terminal state and event
     UI->>API: Poll status/history
     API-->>UI: State, graph, logs, report
 ```
@@ -132,13 +108,13 @@ sequenceDiagram
 - **Tool execution:** execution/step, registered tool name, state, safe input/output summaries, timing.
 - **Audit event:** append-only state changes, plan start, approval decisions, and tool invocation outcomes.
 
-Use SQLAlchemy 2.x and Alembic migrations. Store structured data as typed relational fields plus JSONB where appropriate; do not make an unvalidated JSON blob the sole state representation. Do not persist provider secrets. Apply retention and redaction policy before storing prompts/results that may contain sensitive user data.
+Use SQLAlchemy 2.x and Alembic migrations. Store structured data as typed relational fields plus JSONB where appropriate; do not make an unvalidated JSON blob the sole state representation. Lifecycle event details are allowlisted and omit tool payloads and nested failure details. Workflow task inputs and successful task outputs are stored as JSON for reconstruction; there is no general-purpose secret redactor or retention policy yet, so credentials and data that must not persist must not be submitted.
 
-The initial SQLAlchemy schema is in `backend/app/agentforge/domain/models/`.
-It uses UUID primary keys, PostgreSQL JSONB for validated workflow and execution
-data, foreign keys with explicit delete behavior, and Alembic migrations.
-Execution records may be created before planning completes, so their workflow
-reference is nullable until a versioned workflow is available. The MVP's
+The SQLAlchemy schema is in `backend/app/agentforge/domain/models/`. It uses
+UUID primary keys, PostgreSQL JSONB for workflow/task data, foreign keys with
+explicit delete behavior, and Alembic migrations. The execution model retains
+nullable workflow references for other lifecycle use cases; executions created
+from the workflow API always record the workflow ID and version. The MVP's
 authentication mechanism remains unresolved; the initial users table stores
 only a unique email and does not store a password hash.
 
@@ -169,10 +145,10 @@ The Day 11 API exposes versioned workflow definitions and the existing in-proces
 | `GET` | `/api/v1/workflows` | List persisted definitions with `limit` and `offset`. |
 | `GET` | `/api/v1/workflows/{workflow_id}` | Retrieve a persisted definition and version. |
 | `POST` | `/api/v1/workflows/validate` | Validate a definition and its declared tool permissions without persisting it. |
-| `POST` | `/api/v1/workflows/{workflow_id}/executions` | Create a pending in-memory execution; no agent or tool runs yet. |
+| `POST` | `/api/v1/workflows/{workflow_id}/executions` | Persist a pending execution, initial task rows, and creation event; no agent or tool runs yet. |
 | `POST` | `/api/v1/executions/{execution_id}/start` | Start a pending execution synchronously through the orchestrator and engine. |
-| `GET` | `/api/v1/executions` | List active and retained terminal process-local executions. |
-| `GET` | `/api/v1/executions/{execution_id}` | Retrieve status, task results, events, and execution order. |
+| `GET` | `/api/v1/executions` | List persisted executions with database pagination. |
+| `GET` | `/api/v1/executions/{execution_id}` | Reconstruct status, task results, events, timestamps, and execution order from PostgreSQL. |
 | `POST` | `/api/v1/executions/{execution_id}/cancel` | Cancel pending work or request cooperative cancellation of running work. |
 
 Workflow definitions use the domain Pydantic contracts and validator; tool
@@ -182,18 +158,37 @@ invalid execution transitions return `409`. Request bodies are limited to
 1 MiB. Responses are explicit Pydantic API contracts, not SQLAlchemy objects,
 and error responses do not include raw exception details.
 
-Workflow definitions are persisted to PostgreSQL using the existing
-`workflows` model and `(name, version)` uniqueness convention. Execution state
-is currently held by the synchronous `WorkflowEngine` in process memory; it is
-not written to `workflow_executions`, `execution_steps`, or `execution_events`.
-The explicit start endpoint blocks until the synchronous run reaches a
-terminal state. Cancellation is cooperative and cannot interrupt an active
-synchronous agent or tool call. Execution history is bounded by the configured
-engine history limit and is lost on API process restart. These endpoints
-therefore do not provide durable execution, restart recovery, or a worker
-queue. A background worker, durable execution repository, and asynchronous
-HTTP lifecycle are deferred; the API does not claim that executions survive
-restarts.
+Workflow definitions use the existing `workflows` model and `(name, version)`
+uniqueness convention. Execution persistence uses the existing
+`workflow_executions`, `execution_steps`, and `execution_events` tables through
+`ExecutionRepository`; it adds no duplicate execution tables. The adapter is
+outside the engine and receives detached Pydantic snapshots through an optional
+callback. The engine remains independent of SQLAlchemy and authoritative for
+workflow/task transitions.
+
+Creation commits the execution, version reference, all pending task rows, and
+the `workflow_created` audit event in one transaction before the engine
+registers it in memory. Start, task, tool, failure, cancellation, and terminal
+snapshots each commit their state changes, step results/timestamps, and newly
+appended audit events in one transaction. A per-execution event sequence
+preserves append order and prevents duplicate writes. If a transaction fails,
+the request fails; the adapter does not claim the uncommitted state as durable
+and does not automatically retry execution or tool calls.
+
+Retrieval validates and reconstructs detached API-domain snapshots from the
+workflow definition, execution row, task rows, and ordered events. Listing is
+database-paginated. The API does not expose a state mutation endpoint.
+Execution starts synchronously and blocks its HTTP request. Cancellation is
+cooperative and cannot interrupt an active synchronous agent/tool call.
+Restarted processes can retrieve/list durable history, but active/pending
+records are not rehydrated into the engine and cannot be resumed or cancelled
+through this API. A background worker, automatic recovery, and exactly-once
+external side effects are not implemented.
+
+An agent/tool side effect and its subsequent database transaction cannot be
+made atomic. If persistence fails after a side effect, the durable snapshot
+remains at its last successful commit and the API returns an error; an operator
+must treat the outcome as ambiguous rather than retrying automatically.
 
 ## Failure handling
 
@@ -204,8 +199,8 @@ restarts.
 | Tool schema/policy rejection | Do not invoke tool; record denial and fail or pause with clear reason. |
 | Approval rejected or expires | Do not invoke gated action; persist decision/expiry and terminate or require replanning. |
 | Tool timeout after possible side effect | Treat outcome as ambiguous; do not automatically repeat unless idempotency contract guarantees safe retry. |
-| Database unavailable | Fail closed: do not claim/invoke new work without durable state; surface service failure. |
-| Worker crash | Recover from persisted state and claim lease; never mark unfinished work successful. |
+| Database unavailable | Fail closed at the next engine boundary; surface persistence failure without reporting the new state as durable. |
+| Process restart | Preserve persisted history; active work is not automatically resumed and may remain incomplete for operator inspection. |
 | Reviewer rejects result | Mark execution failed/review-rejected and show assessment; do not return success. |
 | Cancellation | Stop scheduling new steps; cooperative cancellation for active calls; record if an in-flight side effect outcome is unknown. |
 
@@ -219,7 +214,7 @@ restarts.
 | AD-04 | Keep provider adapters behind a provider-neutral interface; use a deterministic mock by default in tests/dev. | Core orchestration does not depend on paid APIs or vendor-specific behavior. |
 | AD-05 | Tools are explicit registered adapters with typed schemas and deny-by-default policy. | LLM output cannot create new capabilities. Shell/exec tools are excluded. |
 | AD-06 | Gate sensitive/external side effects on approval bound to canonical action arguments. | Approval must not authorize a materially changed action. |
-| AD-07 | PostgreSQL is the intended durable source of truth; Day 11 persists workflow definitions, while API execution state remains process-local until a durable engine integration is implemented. | Definition history is durable; execution history is not yet restart-safe, and worker infrastructure remains deferred. |
+| AD-07 | PostgreSQL is the durable source for persisted execution snapshots and workflow definitions; the synchronous engine remains the transition authority. | API snapshots survive restart, but active engine work is not rehydrated; worker infrastructure and exactly-once side effects remain deferred. |
 | AD-08 | MVP targets one trusted operator on a local machine; private-network exposure requires an agreed authentication mechanism. | Avoids pretending minimal MVP controls meet SaaS isolation requirements. |
 | AD-09 | Initial limits: 25 steps, 2 retries, 60-second attempts, 15-minute active execution, 10,000-character task, 24-hour approval expiry, and one tool request per step. | Provides testable guardrails; operators can lower these limits. |
 
@@ -260,10 +255,11 @@ Each task transitions through pending and running to completed or failed;
 dependents of failed or blocked tasks are marked blocked, while independent
 ready tasks continue. The workflow is failed if any task fails or is blocked.
 Agent results, structured errors, UTC lifecycle events, and final task states
-are returned in memory. Event fields map to the existing `ExecutionEvent`
-record (`event_type`, `from_status`, `to_status`, `reason`, `occurred_at`, and
-`details`); the task ID is included in details. This milestone does not persist
-these results or events and adds no API, worker, or migration.
+are returned in memory by the Day 7 engine. Event fields map to the existing
+`ExecutionEvent` record (`event_type`, `from_status`, `to_status`, `reason`,
+`occurred_at`, and `details`); the task ID is included in details. Day 12 adds
+the API persistence adapter described above without coupling SQLAlchemy to the
+engine.
 
 Execution is sequential and finite (at most 25 tasks), with no retries,
 parallelism, generated-code execution, or recursive agent calls. The engine
@@ -326,13 +322,14 @@ sanitized structured result, and cause dependent tasks to be blocked. Tool
 exception text is not included in structured errors. The planner contract does
 not include tool requests, so planner-generated drafts cannot select tools.
 
-This remains a synchronous, in-memory orchestration path using deterministic
-mock agents. It does not add persistence, API endpoints, workers, retries,
-hard interruption for synchronous handlers, or approval/resume mechanics for
-risky tools. The existing tool layer enforces registration, enablement,
-capabilities, schemas, and size bounds; it does not yet model risk classes or
-approval gates. These limits are deliberate and are not claims of durable or
-production orchestration.
+The orchestration path remains synchronous and uses deterministic mock agents.
+Day 10 itself did not add persistence or API endpoints; Day 12 now checkpoints
+API-driven snapshots through the separate persistence adapter above. There
+are still no workers, retries, hard interruption for synchronous handlers, or
+approval/resume mechanics for risky tools. The existing tool layer enforces
+registration, enablement, capabilities, schemas, and size bounds; it does not
+yet model risk classes or approval gates. These limits are deliberate and are
+not claims of automatic recovery or production orchestration.
 
 ## Day 8 execution reliability and state
 

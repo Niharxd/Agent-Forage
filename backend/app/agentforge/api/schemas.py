@@ -60,7 +60,7 @@ class WorkflowValidationResponse(BaseModel):
 
 
 class ExecutionResponse(BaseModel):
-    """Execution state and task results from the in-process workflow engine."""
+    """Reconstructed execution state and task results from durable records."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -77,7 +77,7 @@ class ExecutionResponse(BaseModel):
 
 
 class ExecutionListResponse(BaseModel):
-    """Paginated in-process execution collection."""
+    """Paginated collection of persisted executions."""
 
     items: list[ExecutionResponse]
     total: int

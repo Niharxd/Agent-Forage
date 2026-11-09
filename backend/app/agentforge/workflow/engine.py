@@ -3,7 +3,7 @@
 import json
 import logging
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from threading import RLock
 from uuid import UUID, uuid4
@@ -46,6 +46,8 @@ from agentforge.tools import (
 )
 
 logger = logging.getLogger(__name__)
+
+ExecutionUpdateCallback = Callable[[WorkflowExecutionSnapshot], None]
 
 _REQUIRED_CAPABILITY = {
     AgentRole.PLANNER: AgentCapability.CREATE_PLAN,
@@ -111,6 +113,7 @@ class WorkflowEngine:
         definition: WorkflowDefinitionInput,
         *,
         execution_id: UUID | None = None,
+        on_update: ExecutionUpdateCallback | None = None,
     ) -> WorkflowExecutionSnapshot:
         """Validate and register a pending execution without dispatching an agent."""
         workflow = self.validate_definition(definition)
@@ -126,9 +129,22 @@ class WorkflowEngine:
                 for task in workflow.tasks
             },
         )
+        execution.events.append(
+            WorkflowEvent(
+                event_type=WorkflowEventType.WORKFLOW_CREATED,
+                execution_id=execution.execution_id,
+                timestamp=execution.created_at,
+                to_status=WorkflowStatus.PENDING.value,
+                metadata={
+                    "workflow_name": execution.workflow.name,
+                    "task_count": len(execution.workflow.tasks),
+                },
+            )
+        )
         with self._lock:
             if execution.execution_id in self._active or execution.execution_id in self._history:
                 raise ValueError(f"Execution ID {execution.execution_id} is already in use.")
+            self._notify(execution, on_update)
             self._active[execution.execution_id] = execution
             return execution.snapshot()
 
@@ -171,12 +187,22 @@ class WorkflowEngine:
         definition: WorkflowDefinitionInput,
         *,
         execution_id: UUID | None = None,
+        on_update: ExecutionUpdateCallback | None = None,
     ) -> WorkflowExecution:
         """Create and synchronously run a workflow, preserving the Day 7 API."""
-        pending = self.create_execution(definition, execution_id=execution_id)
-        return self.run(pending.execution_id)
+        pending = self.create_execution(
+            definition,
+            execution_id=execution_id,
+            on_update=on_update,
+        )
+        return self.run(pending.execution_id, on_update=on_update)
 
-    def run(self, execution_id: UUID) -> WorkflowExecution:
+    def run(
+        self,
+        execution_id: UUID,
+        *,
+        on_update: ExecutionUpdateCallback | None = None,
+    ) -> WorkflowExecution:
         """Run an existing pending execution to a terminal state."""
         with self._lock:
             execution = self._active_execution(execution_id)
@@ -200,6 +226,7 @@ class WorkflowEngine:
                     },
                 )
             )
+            self._notify(execution, on_update)
             ordered_tasks = self._validator.topological_order(execution.workflow)
 
         executed_steps = 0
@@ -207,7 +234,7 @@ class WorkflowEngine:
         for task in ordered_tasks:
             with self._lock:
                 if execution.cancellation_requested:
-                    self._cancel_running_execution(execution)
+                    self._cancel_running_execution(execution, on_update)
                     return execution.model_copy(deep=True)
 
                 blocked_by = [
@@ -216,7 +243,7 @@ class WorkflowEngine:
                     if execution.task_results[dependency_id].status != TaskStatus.COMPLETED
                 ]
                 if blocked_by:
-                    self._block_task(execution, task, blocked_by)
+                    self._block_task(execution, task, blocked_by, on_update)
                     continue
 
                 if executed_steps >= self._max_execution_steps:
@@ -230,23 +257,25 @@ class WorkflowEngine:
                                 metadata={"maximum_steps": self._max_execution_steps},
                             )
                         )
+                        self._notify(execution, on_update)
                         limit_event_emitted = True
                     self._skip_task(
                         execution,
                         task,
                         code="execution_step_limit",
                         message="Task was not run because the execution step limit was reached.",
+                        on_update=on_update,
                     )
                     continue
 
-                self._start_task(execution, task)
+                self._start_task(execution, task, on_update)
                 executed_steps += 1
 
-            self._run_task(execution, task)
+            self._run_task(execution, task, on_update)
 
         with self._lock:
             if execution.cancellation_requested:
-                self._cancel_running_execution(execution)
+                self._cancel_running_execution(execution, on_update)
             else:
                 failed = any(
                     result.status in {TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.SKIPPED}
@@ -274,10 +303,16 @@ class WorkflowEngine:
                         ),
                     )
                 )
+                self._notify(execution, on_update)
                 self._archive(execution)
             return execution.model_copy(deep=True)
 
-    def cancel(self, execution_id: UUID) -> WorkflowExecutionSnapshot:
+    def cancel(
+        self,
+        execution_id: UUID,
+        *,
+        on_update: ExecutionUpdateCallback | None = None,
+    ) -> WorkflowExecutionSnapshot:
         """Cancel pending work or request cooperative cancellation between tasks."""
         with self._lock:
             execution = self._active_execution(execution_id)
@@ -300,6 +335,7 @@ class WorkflowEngine:
                         reason="Workflow cancelled before execution started.",
                     )
                 )
+                self._notify(execution, on_update)
                 self._archive(execution)
                 return execution.snapshot()
 
@@ -319,6 +355,7 @@ class WorkflowEngine:
                             ),
                         )
                     )
+                    self._notify(execution, on_update)
                 return execution.snapshot()
 
             raise InvalidExecutionStateError(
@@ -367,7 +404,12 @@ class WorkflowEngine:
             )
         raise ExecutionNotFoundError(f"Execution {execution_id} was not found.")
 
-    def _run_task(self, execution: WorkflowExecution, task: WorkflowTask) -> None:
+    def _run_task(
+        self,
+        execution: WorkflowExecution,
+        task: WorkflowTask,
+        on_update: ExecutionUpdateCallback | None,
+    ) -> None:
         try:
             agent_input = self._agent_input(execution, task)
         except Exception as exc:
@@ -386,6 +428,7 @@ class WorkflowEngine:
                 code="task_input_error",
                 message="The task input could not be prepared safely.",
                 details={"exception_type": type(exc).__name__},
+                on_update=on_update,
             )
             return
 
@@ -396,6 +439,7 @@ class WorkflowEngine:
                 code="task_input_limit",
                 message="The agent input exceeded the configured size limit.",
                 details={"maximum_input_bytes": self._validator.max_task_input_bytes},
+                on_update=on_update,
             )
             return
 
@@ -417,6 +461,7 @@ class WorkflowEngine:
                 code="agent_exception",
                 message="The registered agent raised an unexpected exception.",
                 details={"exception_type": type(exc).__name__},
+                on_update=on_update,
             )
             return
 
@@ -435,6 +480,7 @@ class WorkflowEngine:
                 task,
                 code="invalid_agent_result",
                 message="The agent returned an invalid execution result.",
+                on_update=on_update,
             )
             return
 
@@ -446,6 +492,7 @@ class WorkflowEngine:
                     task,
                     code="invalid_agent_failure",
                     message="The agent returned an invalid failure result.",
+                    on_update=on_update,
                 )
                 return
             logger.warning(
@@ -466,6 +513,7 @@ class WorkflowEngine:
                     "The agent could not complete the task.",
                 ),
                 details={"agent_error_code": agent_error.code.value},
+                on_update=on_update,
             )
             return
 
@@ -476,6 +524,7 @@ class WorkflowEngine:
                 code="result_too_large",
                 message="The agent result exceeded the configured size limit.",
                 details={"maximum_result_bytes": self._max_result_bytes},
+                on_update=on_update,
             )
             return
 
@@ -501,6 +550,7 @@ class WorkflowEngine:
                         metadata={"tool_id": task.tool_request.tool_id},
                     )
                 )
+                self._notify(execution, on_update)
             tool_result = self._tool_executor.execute(
                 request,
                 agent_capabilities=agent.supported_capabilities,
@@ -527,6 +577,7 @@ class WorkflowEngine:
                         },
                     )
                 )
+                self._notify(execution, on_update)
             if not succeeded:
                 error_code = (
                     tool_result.error.code
@@ -541,6 +592,7 @@ class WorkflowEngine:
                     details={"tool_error_code": error_code},
                     agent_result=agent_result,
                     tool_result=safe_tool_result,
+                    on_update=on_update,
                 )
                 return
 
@@ -560,6 +612,7 @@ class WorkflowEngine:
                     details={"review_verdict": str(verdict or "invalid")},
                     agent_result=agent_result,
                     tool_result=safe_tool_result,
+                    on_update=on_update,
                 )
                 return
 
@@ -584,8 +637,14 @@ class WorkflowEngine:
                     },
                 )
             )
+            self._notify(execution, on_update)
 
-    def _start_task(self, execution: WorkflowExecution, task: WorkflowTask) -> None:
+    def _start_task(
+        self,
+        execution: WorkflowExecution,
+        task: WorkflowTask,
+        on_update: ExecutionUpdateCallback | None,
+    ) -> None:
         result = execution.task_results[task.task_id]
         started_at = self._now()
         result.transition_to(TaskStatus.RUNNING)
@@ -602,6 +661,7 @@ class WorkflowEngine:
                 metadata={"agent_type": task.agent_type.value},
             )
         )
+        self._notify(execution, on_update)
 
     def _fail_task(
         self,
@@ -613,6 +673,7 @@ class WorkflowEngine:
         details: dict[str, str | int] | None = None,
         agent_result: AgentExecutionResult | None = None,
         tool_result: ToolExecutionResult | None = None,
+        on_update: ExecutionUpdateCallback | None = None,
     ) -> None:
         with self._lock:
             result = execution.task_results[task.task_id]
@@ -646,12 +707,14 @@ class WorkflowEngine:
                     },
                 )
             )
+            self._notify(execution, on_update)
 
     def _block_task(
         self,
         execution: WorkflowExecution,
         task: WorkflowTask,
         blocked_by: list[str],
+        on_update: ExecutionUpdateCallback | None = None,
     ) -> None:
         result = execution.task_results[task.task_id]
         blocked_at = self._now()
@@ -675,6 +738,7 @@ class WorkflowEngine:
                 metadata={"blocked_by": blocked_by},
             )
         )
+        self._notify(execution, on_update)
 
     def _skip_task(
         self,
@@ -683,6 +747,7 @@ class WorkflowEngine:
         *,
         code: str,
         message: str,
+        on_update: ExecutionUpdateCallback | None = None,
     ) -> None:
         result = execution.task_results[task.task_id]
         skipped_at = self._now()
@@ -704,6 +769,7 @@ class WorkflowEngine:
                 reason=message,
             )
         )
+        self._notify(execution, on_update)
 
     def _skip_pending_tasks(
         self,
@@ -716,7 +782,11 @@ class WorkflowEngine:
             if execution.task_results[task.task_id].status == TaskStatus.PENDING:
                 self._skip_task(execution, task, code=code, message=message)
 
-    def _cancel_running_execution(self, execution: WorkflowExecution) -> None:
+    def _cancel_running_execution(
+        self,
+        execution: WorkflowExecution,
+        on_update: ExecutionUpdateCallback | None,
+    ) -> None:
         self._skip_pending_tasks(
             execution,
             code="workflow_cancelled",
@@ -735,6 +805,7 @@ class WorkflowEngine:
                 reason="Workflow cancelled between task executions.",
             )
         )
+        self._notify(execution, on_update)
         self._archive(execution)
 
     def _archive(self, execution: WorkflowExecution) -> None:
@@ -743,6 +814,14 @@ class WorkflowEngine:
         while len(self._history) > self._max_history_size:
             self._history.popitem(last=False)
         self._active.pop(execution.execution_id, None)
+
+    @staticmethod
+    def _notify(
+        execution: WorkflowExecution,
+        on_update: ExecutionUpdateCallback | None,
+    ) -> None:
+        if on_update is not None:
+            on_update(execution.snapshot())
 
     def _agent_input(
         self,

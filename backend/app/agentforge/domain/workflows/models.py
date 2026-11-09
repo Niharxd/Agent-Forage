@@ -54,6 +54,7 @@ class TaskStatus(StrEnum):
 class WorkflowEventType(StrEnum):
     """Structured lifecycle events emitted by the execution engine."""
 
+    WORKFLOW_CREATED = "workflow_created"
     WORKFLOW_STARTED = "workflow_started"
     TASK_STARTED = "task_started"
     TASK_COMPLETED = "task_completed"

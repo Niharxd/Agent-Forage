@@ -11,9 +11,9 @@ from agentforge.api.schemas import WorkflowResponse
 from agentforge.config.settings import Settings
 from agentforge.database.dependencies import get_db_session
 from agentforge.domain.agents import AgentRole
-from agentforge.domain.workflows.models import WorkflowDefinition
+from agentforge.domain.workflows.models import WorkflowDefinition, WorkflowExecutionSnapshot
 from agentforge.main import create_app
-from agentforge.workflow import WorkflowEngine
+from agentforge.workflow import ExecutionNotFoundError, WorkflowEngine
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -24,6 +24,33 @@ def api(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, WorkflowEngine, Fa
     application = create_app(settings)
     workflow_engine = WorkflowEngine(settings=settings)
     stored_workflows: dict[UUID, WorkflowResponse] = {}
+    stored_executions: dict[UUID, WorkflowExecutionSnapshot] = {}
+
+    class FakeExecutionRepository:
+        def __init__(self, _session) -> None:
+            pass
+
+        def create_execution(self, snapshot, **_values) -> None:
+            stored_executions[snapshot.execution_id] = snapshot.model_copy(deep=True)
+
+        def synchronize_execution(self, snapshot) -> None:
+            stored_executions[snapshot.execution_id] = snapshot.model_copy(deep=True)
+
+        def get_execution(self, execution_id: UUID) -> WorkflowExecutionSnapshot:
+            snapshot = stored_executions.get(execution_id)
+            if snapshot is None:
+                raise ExecutionNotFoundError
+            return snapshot.model_copy(deep=True)
+
+        def list_executions(self, *, limit: int, offset: int):
+            records = sorted(
+                stored_executions.values(),
+                key=lambda item: (item.created_at, str(item.execution_id)),
+                reverse=True,
+            )
+            return [item.model_copy(deep=True) for item in records[offset : offset + limit]], len(
+                records
+            )
 
     def create_stored_workflow(_, definition: WorkflowDefinition) -> WorkflowResponse:
         versions = [
@@ -59,6 +86,7 @@ def api(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, WorkflowEngine, Fa
     monkeypatch.setattr(workflow_routes, "get_workflow", get_stored_workflow)
     monkeypatch.setattr(workflow_routes, "list_workflows", list_stored_workflows)
     monkeypatch.setattr(execution_routes, "get_workflow", get_stored_workflow)
+    monkeypatch.setattr(execution_routes, "ExecutionRepository", FakeExecutionRepository)
     application.dependency_overrides[get_db_session] = override_session
     application.dependency_overrides[get_workflow_engine] = lambda: workflow_engine
     with TestClient(application, raise_server_exceptions=False) as client:
@@ -155,7 +183,7 @@ def test_missing_workflow_and_invalid_payload_use_safe_http_errors(api) -> None:
 
 
 def test_execution_create_start_get_list_and_task_results(api) -> None:
-    client, _, _ = api
+    client, _, application = api
     workflow = client.post("/api/v1/workflows", json=workflow_body()).json()
 
     pending = client.post(f"/api/v1/workflows/{workflow['id']}/executions")
@@ -182,6 +210,11 @@ def test_execution_create_start_get_list_and_task_results(api) -> None:
     assert repeated_start.status_code == 409
     assert repeated_start.json()["error"]["code"] == "conflict"
 
+    application.state.workflow_engine = WorkflowEngine()
+    retrieved_after_engine_replacement = client.get(f"/api/v1/executions/{execution_id}")
+    assert retrieved_after_engine_replacement.status_code == 200
+    assert retrieved_after_engine_replacement.json()["status"] == "completed"
+
 
 def test_pending_execution_can_be_cancelled_and_terminal_transitions_rejected(api) -> None:
     client, _, _ = api
@@ -196,6 +229,26 @@ def test_pending_execution_can_be_cancelled_and_terminal_transitions_rejected(ap
 
     invalid_cancel = client.post(f"/api/v1/executions/{execution_id}/cancel")
     assert invalid_cancel.status_code == 409
+
+
+def test_persistence_failure_never_returns_execution_success(api, monkeypatch) -> None:
+    client, _, _ = api
+    workflow = client.post("/api/v1/workflows", json=workflow_body()).json()
+    pending = client.post(f"/api/v1/workflows/{workflow['id']}/executions").json()
+
+    def fail_synchronization(self, _snapshot) -> None:
+        raise RuntimeError("private persistence details")
+
+    monkeypatch.setattr(
+        execution_routes.ExecutionRepository,
+        "synchronize_execution",
+        fail_synchronization,
+    )
+    response = client.post(f"/api/v1/executions/{pending['execution_id']}/start")
+
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "internal_error"
+    assert "private persistence details" not in response.text
 
 
 def test_running_execution_cancellation_is_cooperative_through_api(api) -> None:

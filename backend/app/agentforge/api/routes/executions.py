@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from agentforge.api.dependencies import get_workflow_engine, get_workflow_orchestrator
 from agentforge.api.schemas import ExecutionListResponse, ExecutionResponse, PageLimit
+from agentforge.api.services.executions import ExecutionRepository
 from agentforge.api.services.workflows import get_workflow
 from agentforge.database.dependencies import get_db_session
 from agentforge.domain.workflows.models import WorkflowExecution, WorkflowExecutionSnapshot
@@ -44,7 +45,16 @@ def create_execution(
     if workflow is None:
         raise HTTPException(status_code=404, detail="Workflow not found.")
     try:
-        snapshot = engine.create_execution(workflow.workflow_definition)
+        repository = ExecutionRepository(session)
+        snapshot = engine.create_execution(
+            workflow.workflow_definition,
+            on_update=lambda value: repository.create_execution(
+                value,
+                workflow_id=workflow.id,
+                workflow_version=workflow.version,
+                definition=workflow.workflow_definition,
+            ),
+        )
     except WorkflowValidationError as exc:
         raise HTTPException(
             status_code=422,
@@ -65,11 +75,13 @@ def create_execution(
 @router.post("/executions/{execution_id}/start", response_model=ExecutionResponse)
 def start_execution(
     execution_id: UUID,
+    session: Annotated[Session, Depends(get_db_session)],
     orchestrator: Annotated[WorkflowOrchestrator, Depends(get_workflow_orchestrator)],
 ) -> ExecutionResponse:
     """Synchronously run a pending execution through the existing workflow engine."""
+    repository = ExecutionRepository(session)
     try:
-        execution = orchestrator.start(execution_id)
+        execution = orchestrator.start(execution_id, on_update=repository.synchronize_execution)
     except ExecutionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Execution not found.") from exc
     except InvalidExecutionStateError as exc:
@@ -82,15 +94,15 @@ def start_execution(
 
 @router.get("/executions", response_model=ExecutionListResponse)
 def get_executions(
-    engine: Annotated[WorkflowEngine, Depends(get_workflow_engine)],
+    session: Annotated[Session, Depends(get_db_session)],
     limit: PageLimit = Query(default=50),
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> ExecutionListResponse:
-    """List active and retained terminal process-local executions."""
-    snapshots = engine.list_all_executions()
+    """List persisted executions with database-backed pagination."""
+    snapshots, total = ExecutionRepository(session).list_executions(limit=limit, offset=offset)
     return ExecutionListResponse(
-        items=[_execution_response(item) for item in snapshots[offset : offset + limit]],
-        total=len(snapshots),
+        items=[_execution_response(item) for item in snapshots],
+        total=total,
         limit=limit,
         offset=offset,
     )
@@ -99,11 +111,11 @@ def get_executions(
 @router.get("/executions/{execution_id}", response_model=ExecutionResponse)
 def get_execution(
     execution_id: UUID,
-    engine: Annotated[WorkflowEngine, Depends(get_workflow_engine)],
+    session: Annotated[Session, Depends(get_db_session)],
 ) -> ExecutionResponse:
-    """Retrieve an execution's state, events, and task-level results."""
+    """Reconstruct an execution's state, events, and task-level results from PostgreSQL."""
     try:
-        snapshot = engine.get_execution(execution_id)
+        snapshot = ExecutionRepository(session).get_execution(execution_id)
     except ExecutionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Execution not found.") from exc
     return _execution_response(snapshot)
@@ -112,11 +124,15 @@ def get_execution(
 @router.post("/executions/{execution_id}/cancel", response_model=ExecutionResponse)
 def cancel_execution(
     execution_id: UUID,
+    session: Annotated[Session, Depends(get_db_session)],
     orchestrator: Annotated[WorkflowOrchestrator, Depends(get_workflow_orchestrator)],
 ) -> ExecutionResponse:
     """Cancel pending work or request cooperative cancellation of running work."""
     try:
-        snapshot = orchestrator.cancel(execution_id)
+        snapshot = orchestrator.cancel(
+            execution_id,
+            on_update=ExecutionRepository(session).synchronize_execution,
+        )
     except ExecutionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Execution not found.") from exc
     except InvalidExecutionStateError as exc:

@@ -4,6 +4,11 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from agentforge.api.services.executions import (
+    ExecutionAlreadyExistsError,
+    ExecutionPersistenceError,
+    ExecutionRepository,
+)
 from agentforge.config.settings import Settings
 from agentforge.database.dependencies import get_db_session
 from agentforge.database.engine import create_database_engine
@@ -17,14 +22,22 @@ from agentforge.domain.models import (
     Workflow,
     WorkflowExecution,
 )
+from agentforge.domain.workflows.models import (
+    TaskStatus,
+    WorkflowDefinition,
+    WorkflowEventType,
+    WorkflowExecutionSnapshot,
+    WorkflowStatus,
+)
 from agentforge.main import create_app
+from agentforge.workflow import ExecutionNotFoundError, WorkflowEngine
 from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from fastapi import Depends
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, select, text, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
@@ -61,6 +74,9 @@ def migrated_database() -> Iterator[Engine]:
         with engine.begin() as connection:
             Base.metadata.drop_all(connection)
             connection.execute(text("DROP TABLE IF EXISTS alembic_version"))
+            connection.execute(
+                text("DROP FUNCTION IF EXISTS public.prevent_execution_event_mutation()")
+            )
 
         with engine.connect() as connection:
             command.upgrade(_alembic_config(connection), "head")
@@ -71,6 +87,9 @@ def migrated_database() -> Iterator[Engine]:
             with engine.begin() as connection:
                 Base.metadata.drop_all(connection)
                 connection.execute(text("DROP TABLE IF EXISTS alembic_version"))
+                connection.execute(
+                    text("DROP FUNCTION IF EXISTS public.prevent_execution_event_mutation()")
+                )
         finally:
             engine.dispose()
 
@@ -301,3 +320,357 @@ def test_migration_metadata_matches_current_schema_and_supports_rollback(
         command.downgrade(_alembic_config(connection), "base")
         assert MigrationContext.configure(connection).get_current_revision() is None
         command.upgrade(_alembic_config(connection), "head")
+        connection.commit()
+
+
+def _create_persisted_execution(
+    session: Session,
+    *,
+    definition: WorkflowDefinition,
+    engine: WorkflowEngine | None = None,
+) -> tuple[Workflow, WorkflowEngine, ExecutionRepository, WorkflowExecutionSnapshot]:
+    workflow = Workflow(
+        name=f"execution-test-{uuid4().hex}",
+        description="A persisted workflow.",
+        workflow_definition=definition.model_dump(mode="json"),
+        version=1,
+    )
+    session.add(workflow)
+    session.commit()
+    workflow_engine = engine or WorkflowEngine()
+    repository = ExecutionRepository(session)
+    snapshot = workflow_engine.create_execution(
+        definition,
+        on_update=lambda value: repository.create_execution(
+            value,
+            workflow_id=workflow.id,
+            workflow_version=workflow.version,
+            definition=definition,
+        ),
+    )
+    return workflow, workflow_engine, repository, snapshot
+
+
+def _one_task_definition(*, dependent: bool = False) -> WorkflowDefinition:
+    tasks = [{"task_id": "first", "agent_type": "analyst"}]
+    if dependent:
+        tasks.append(
+            {
+                "task_id": "blocked",
+                "agent_type": "analyst",
+                "dependency_ids": ["first"],
+            }
+        )
+    return WorkflowDefinition(name="execution persistence", tasks=tasks)
+
+
+def test_execution_create_persists_reference_tasks_and_ordered_created_event(
+    db_session: Session,
+) -> None:
+    workflow, _, _, snapshot = _create_persisted_execution(
+        db_session,
+        definition=_one_task_definition(),
+    )
+    record = db_session.get(WorkflowExecution, snapshot.execution_id)
+    steps = db_session.scalars(
+        select(ExecutionStep).where(ExecutionStep.execution_id == snapshot.execution_id)
+    ).all()
+    events = db_session.scalars(
+        select(ExecutionEvent)
+        .where(ExecutionEvent.execution_id == snapshot.execution_id)
+        .order_by(ExecutionEvent.sequence_number)
+    ).all()
+
+    assert record is not None
+    assert record.workflow_id == workflow.id
+    assert record.plan_version == workflow.version
+    assert record.status == WorkflowStatus.PENDING.value
+    assert record.created_at.tzinfo is not None
+    assert record.started_at is None and record.completed_at is None
+    assert len(steps) == 1
+    assert steps[0].task_id == "first"
+    assert steps[0].status == TaskStatus.PENDING.value
+    assert steps[0].output_data["status"] == TaskStatus.PENDING.value
+    assert [(event.sequence_number, event.event_type) for event in events] == [
+        (1, WorkflowEventType.WORKFLOW_CREATED.value)
+    ]
+
+
+def test_completed_execution_reconstructs_results_timestamps_and_event_order(
+    migrated_database: Engine,
+) -> None:
+    definition = _one_task_definition()
+    with Session(migrated_database) as session:
+        _, engine, repository, pending = _create_persisted_execution(
+            session,
+            definition=definition,
+        )
+        completed = engine.run(
+            pending.execution_id,
+            on_update=repository.synchronize_execution,
+        )
+        repository.synchronize_execution(completed.snapshot())
+
+    with Session(migrated_database) as session:
+        reconstructed = ExecutionRepository(session).get_execution(pending.execution_id)
+
+    assert reconstructed.status == WorkflowStatus.COMPLETED
+    assert reconstructed.started_at is not None and reconstructed.completed_at is not None
+    assert reconstructed.task_results["first"].status == TaskStatus.COMPLETED
+    assert reconstructed.task_results["first"].agent_result is not None
+    assert reconstructed.task_results["first"].started_at is not None
+    assert reconstructed.task_results["first"].completed_at is not None
+    assert reconstructed.execution_order == ["first"]
+    assert [event.event_type for event in reconstructed.events] == [
+        WorkflowEventType.WORKFLOW_CREATED,
+        WorkflowEventType.WORKFLOW_STARTED,
+        WorkflowEventType.TASK_STARTED,
+        WorkflowEventType.TASK_COMPLETED,
+        WorkflowEventType.WORKFLOW_COMPLETED,
+    ]
+    assert [event.timestamp for event in reconstructed.events] == sorted(
+        event.timestamp for event in reconstructed.events
+    )
+
+    with Session(migrated_database) as session:
+        persisted_event_count = session.scalar(
+            select(func.count())
+            .select_from(ExecutionEvent)
+            .where(ExecutionEvent.execution_id == pending.execution_id)
+        )
+    assert persisted_event_count == len(reconstructed.events)
+
+
+def test_failed_and_blocked_task_states_reconstruct_from_database(
+    migrated_database: Engine,
+) -> None:
+    definition = _one_task_definition(dependent=True)
+    limited_engine = WorkflowEngine(
+        settings=Settings(_env_file=None, workflow_max_task_input_bytes=2)
+    )
+    with Session(migrated_database) as session:
+        _, engine, repository, pending = _create_persisted_execution(
+            session,
+            definition=definition,
+            engine=limited_engine,
+        )
+        engine.run(pending.execution_id, on_update=repository.synchronize_execution)
+
+    with Session(migrated_database) as session:
+        reconstructed = ExecutionRepository(session).get_execution(pending.execution_id)
+
+    assert reconstructed.status == WorkflowStatus.FAILED
+    assert reconstructed.task_results["first"].status == TaskStatus.FAILED
+    assert reconstructed.task_results["first"].error is not None
+    assert reconstructed.task_results["blocked"].status == TaskStatus.BLOCKED
+    assert reconstructed.task_results["blocked"].error is not None
+    assert WorkflowEventType.TASK_FAILED in [event.event_type for event in reconstructed.events]
+    assert WorkflowEventType.TASK_BLOCKED in [event.event_type for event in reconstructed.events]
+    with Session(migrated_database) as session:
+        failure_event = session.scalar(
+            select(ExecutionEvent).where(
+                ExecutionEvent.execution_id == pending.execution_id,
+                ExecutionEvent.event_type == WorkflowEventType.TASK_FAILED.value,
+            )
+        )
+    assert failure_event is not None
+    assert "error" not in failure_event.details
+
+
+def test_pending_cancellation_persists_skips_and_terminal_state(
+    migrated_database: Engine,
+) -> None:
+    with Session(migrated_database) as session:
+        _, engine, repository, pending = _create_persisted_execution(
+            session,
+            definition=_one_task_definition(dependent=True),
+        )
+        engine.cancel(pending.execution_id, on_update=repository.synchronize_execution)
+
+    with Session(migrated_database) as session:
+        reconstructed = ExecutionRepository(session).get_execution(pending.execution_id)
+
+    assert reconstructed.status == WorkflowStatus.CANCELLED
+    assert reconstructed.completed_at is not None
+    assert all(
+        result.status == TaskStatus.SKIPPED for result in reconstructed.task_results.values()
+    )
+    assert reconstructed.events[-1].event_type == WorkflowEventType.WORKFLOW_CANCELLED
+
+
+def test_initial_execution_transaction_rolls_back_all_rows_on_commit_failure(
+    migrated_database: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    definition = _one_task_definition()
+    with Session(migrated_database) as session:
+        workflow = Workflow(
+            name=f"rollback-{uuid4().hex}",
+            workflow_definition=definition.model_dump(mode="json"),
+            version=1,
+        )
+        session.add(workflow)
+        session.commit()
+        execution_id = uuid4()
+        snapshot = WorkflowEngine().create_execution(definition, execution_id=execution_id)
+        repository = ExecutionRepository(session)
+
+        def fail_commit() -> None:
+            raise RuntimeError("controlled commit failure")
+
+        monkeypatch.setattr(session, "commit", fail_commit)
+        with pytest.raises(ExecutionPersistenceError):
+            repository.create_execution(
+                snapshot,
+                workflow_id=workflow.id,
+                workflow_version=workflow.version,
+                definition=definition,
+            )
+
+    with Session(migrated_database) as session:
+        assert session.get(WorkflowExecution, execution_id) is None
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(ExecutionStep)
+                .where(ExecutionStep.execution_id == execution_id)
+            )
+            == 0
+        )
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(ExecutionEvent)
+                .where(ExecutionEvent.execution_id == execution_id)
+            )
+            == 0
+        )
+
+
+def test_event_failure_does_not_report_durable_success_or_leave_partial_state(
+    migrated_database: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with Session(migrated_database) as session:
+        _, engine, repository, pending = _create_persisted_execution(
+            session,
+            definition=_one_task_definition(),
+        )
+        insert_events = repository._insert_events
+
+        def fail_on_task_completion(events, *, start_sequence: int = 1) -> None:
+            if any(event.event_type == WorkflowEventType.TASK_COMPLETED for event in events):
+                raise RuntimeError("controlled event insert failure")
+            insert_events(events, start_sequence=start_sequence)
+
+        monkeypatch.setattr(repository, "_insert_events", fail_on_task_completion)
+        with pytest.raises(ExecutionPersistenceError):
+            engine.run(pending.execution_id, on_update=repository.synchronize_execution)
+
+    with Session(migrated_database) as session:
+        durable = ExecutionRepository(session).get_execution(pending.execution_id)
+
+    assert durable.status == WorkflowStatus.RUNNING
+    assert durable.task_results["first"].status == TaskStatus.RUNNING
+    assert WorkflowEventType.TASK_COMPLETED not in [event.event_type for event in durable.events]
+
+
+def test_terminal_persistence_failure_does_not_report_durable_completion(
+    migrated_database: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with Session(migrated_database) as session:
+        _, engine, repository, pending = _create_persisted_execution(
+            session,
+            definition=_one_task_definition(),
+        )
+        insert_events = repository._insert_events
+
+        def fail_on_workflow_completion(events, *, start_sequence: int = 1) -> None:
+            if any(event.event_type == WorkflowEventType.WORKFLOW_COMPLETED for event in events):
+                raise RuntimeError("controlled terminal event insert failure")
+            insert_events(events, start_sequence=start_sequence)
+
+        monkeypatch.setattr(repository, "_insert_events", fail_on_workflow_completion)
+        with pytest.raises(ExecutionPersistenceError):
+            engine.run(pending.execution_id, on_update=repository.synchronize_execution)
+
+    with Session(migrated_database) as session:
+        durable = ExecutionRepository(session).get_execution(pending.execution_id)
+
+    assert durable.status == WorkflowStatus.RUNNING
+    assert durable.task_results["first"].status == TaskStatus.COMPLETED
+    assert durable.completed_at is None
+    assert WorkflowEventType.WORKFLOW_COMPLETED not in [
+        event.event_type for event in durable.events
+    ]
+
+
+def test_duplicate_execution_creation_is_rejected_without_duplicate_events(
+    migrated_database: Engine,
+) -> None:
+    definition = _one_task_definition()
+    with Session(migrated_database) as session:
+        workflow, _, repository, snapshot = _create_persisted_execution(
+            session,
+            definition=definition,
+        )
+        with pytest.raises(ExecutionAlreadyExistsError):
+            repository.create_execution(
+                snapshot,
+                workflow_id=workflow.id,
+                workflow_version=workflow.version,
+                definition=definition,
+            )
+
+    with Session(migrated_database) as session:
+        reconstructed = ExecutionRepository(session).get_execution(snapshot.execution_id)
+
+    assert len(reconstructed.events) == 1
+
+
+def test_missing_persisted_execution_raises_not_found(
+    migrated_database: Engine,
+) -> None:
+    with Session(migrated_database) as session:
+        with pytest.raises(ExecutionNotFoundError):
+            ExecutionRepository(session).get_execution(uuid4())
+
+
+def test_persisted_execution_api_survives_engine_history_replacement(
+    migrated_database: Engine,
+) -> None:
+    settings = Settings(_env_file=None, app_env="test")
+    application = create_app(settings)
+    payload = {
+        "name": f"api-execution-{uuid4().hex}",
+        "description": "Persisted API execution.",
+        "tasks": [{"task_id": "analyze", "agent_type": "analyst"}],
+    }
+
+    with TestClient(application) as client:
+        workflow_response = client.post("/api/v1/workflows", json=payload)
+        assert workflow_response.status_code == 201
+        workflow_id = workflow_response.json()["id"]
+        create_response = client.post(f"/api/v1/workflows/{workflow_id}/executions")
+        assert create_response.status_code == 201
+        execution_id = create_response.json()["execution_id"]
+        start_response = client.post(f"/api/v1/executions/{execution_id}/start")
+        assert start_response.status_code == 200
+        assert start_response.json()["status"] == "completed"
+
+        application.state.workflow_engine = WorkflowEngine(settings=settings)
+        retrieved = client.get(f"/api/v1/executions/{execution_id}")
+        listing = client.get("/api/v1/executions", params={"limit": 1})
+        cancelled_create = client.post(f"/api/v1/workflows/{workflow_id}/executions")
+        cancellation = client.post(
+            f"/api/v1/executions/{cancelled_create.json()['execution_id']}/cancel"
+        )
+
+    assert retrieved.status_code == 200
+    assert retrieved.json()["execution_id"] == execution_id
+    assert retrieved.json()["events"][-1]["event_type"] == "workflow_completed"
+    assert listing.status_code == 200
+    assert listing.json()["total"] >= 2
+    assert cancellation.status_code == 200
+    assert cancellation.json()["status"] == "cancelled"

@@ -318,6 +318,7 @@ def test_successful_execution_emits_lifecycle_events_and_timestamps() -> None:
 
     assert result.status == WorkflowStatus.COMPLETED
     assert event_types == [
+        WorkflowEventType.WORKFLOW_CREATED,
         WorkflowEventType.WORKFLOW_STARTED,
         WorkflowEventType.TASK_STARTED,
         WorkflowEventType.TASK_COMPLETED,
@@ -327,7 +328,7 @@ def test_successful_execution_emits_lifecycle_events_and_timestamps() -> None:
     assert result.completed_at is not None
     assert result.events[0].timestamp.tzinfo is not None
     assert result.events[0].occurred_at == result.events[0].timestamp
-    assert result.events[1].details["task_id"] == "one"
+    assert result.events[2].details["task_id"] == "one"
 
 
 def test_invalid_workflow_is_rejected_before_agent_invocation() -> None:

@@ -112,10 +112,10 @@ SQLAlchemy models and raw exception messages are not returned.
 | `GET` | `/workflows?limit=50&offset=0` | List persisted workflow versions. |
 | `GET` | `/workflows/{workflow_id}` | Retrieve one persisted workflow version. |
 | `POST` | `/workflows/validate` | Validate the definition and tool permissions without persisting it; returns `valid` and safe issue codes/locations. |
-| `POST` | `/workflows/{workflow_id}/executions` | Create a pending execution without invoking agents or tools. |
+| `POST` | `/workflows/{workflow_id}/executions` | Persist a pending execution and task records without invoking agents or tools. |
 | `POST` | `/executions/{execution_id}/start` | Explicitly run pending work through the existing orchestrator and workflow engine. |
-| `GET` | `/executions?limit=50&offset=0` | List active and retained terminal in-process executions. |
-| `GET` | `/executions/{execution_id}` | Return execution status, lifecycle events, task-level results, and execution order. |
+| `GET` | `/executions?limit=50&offset=0` | List persisted executions with database-backed pagination. |
+| `GET` | `/executions/{execution_id}` | Reconstruct execution status, lifecycle events, task-level results, and execution order from PostgreSQL. |
 | `POST` | `/executions/{execution_id}/cancel` | Cancel pending work or request cooperative cancellation while running. |
 
 Workflow definitions are stored in the existing PostgreSQL `workflows` table.
@@ -123,16 +123,55 @@ Creating another definition with the same name creates its next version under
 the existing unique `(name, version)` constraint. The API does not introduce
 another workflow or execution table.
 
-Execution records are **not currently persisted**: the existing synchronous
-engine retains active executions and bounded terminal history in process
-memory. Starting an execution blocks the HTTP request until the engine
-completes. A running cancellation request takes effect between synchronous
-agent/tool calls; it cannot interrupt a call already in progress. Restarting
-the API loses all active and terminal execution history. The `workflow_executions`,
-`execution_steps`, and `execution_events` SQLAlchemy models are not wired to
-the engine by this API, so this behavior is not durable and does not provide
-restart recovery. A separate worker, Redis, and distributed scheduling are
-not introduced.
+### Execution persistence and lifecycle (Day 12)
+
+The API persists executions using the existing `workflow_executions`,
+`execution_steps`, and `execution_events` SQLAlchemy models. It stores the
+referenced workflow ID/version, the initial pending state and timestamps, one
+step record per workflow task, task inputs/results, safe failure messages, and
+ordered lifecycle events. Event details are allowlisted and omit tool payloads
+and nested failure details. Successful task outputs and workflow inputs are
+stored for reconstruction; no general-purpose secret redactor or retention
+policy exists, so do not submit credentials or data that must not persist. It
+does not create duplicate persistence tables.
+
+`WorkflowEngine` remains independent of SQLAlchemy and owns all transition
+validation. It reports detached Pydantic snapshots through a callback; the
+`ExecutionRepository` adapter in `app/agentforge/api/services/executions.py`
+commits each state snapshot, task changes, and newly appended events together.
+Execution creation commits the execution, task rows, and `workflow_created`
+event in one transaction before the engine registers it. Event sequence numbers
+preserve append order and prevent duplicate event writes. A database exception
+rolls back the complete transaction and is surfaced as an API failure; the
+engine does not retry tool or agent calls after a persistence failure.
+
+Retrieval validates and reconstructs detached API snapshots from the workflow
+definition, execution, task, and event rows. Listing and pagination are
+database-backed, so retrieval continues to work after process-local engine
+history has been replaced. API clients have no direct execution-state update
+endpoint.
+
+Starting work remains synchronous and blocks the HTTP request. Cancellation
+while running is cooperative and takes effect between synchronous agent/tool
+calls; it cannot interrupt a call already in progress. Persisted history
+survives an API restart, but active/pending records are not rehydrated into the
+engine and cannot be resumed or cancelled after restart. There is no worker,
+automatic recovery, or exactly-once side-effect guarantee.
+
+Database writes cannot be atomic with external agent/tool side effects. If an
+agent/tool completes and its following persistence transaction fails, the
+database remains at the last committed state and the API reports failure; the
+side-effect outcome may be ambiguous and must not be automatically retried.
+
+The Day 12 migration adds the engine's `pending`/`completed` workflow and
+`completed`/`blocked`/`skipped` task states to existing constraints and adds a
+per-execution sequence to audit events. Existing tables are reused.
+
+Invalid request/schema input returns `422`; missing workflow or execution IDs
+return `404`; invalid execution transitions return `409`; request bodies above
+1 MiB return `413`. Error responses use stable codes and omit raw Python
+exception messages. The API adds no authentication or authorization layer;
+keep the service on a trusted local interface.
 
 Invalid request/schema input returns `422`; missing workflow or execution IDs
 return `404`; invalid execution transitions return `409`; request bodies above
@@ -225,14 +264,15 @@ direct dependent tasks; denied or failed tool calls fail the task and block
 dependents. Planner output cannot declare tools. Tool failure results omit raw
 handler exception text.
 
-No real LLM, filesystem, shell, or internet integration is invoked. Execution
-state and events remain in memory. This integration does not add API endpoints,
-database persistence, migrations, parallelism, retries, worker infrastructure,
-or restart recovery. Tool execution is synchronous; elapsed-time limits are
-checked after a handler returns and cannot interrupt a stuck handler. The
-current tool contract has no risk-classification or approval/resume workflow,
-so this integration enforces registration, capability, schema, and size policy
-but does not claim approval gating for side effects.
+No real LLM, filesystem, shell, or internet integration is invoked. Direct
+engine calls still keep their own state in memory; the Day 12 API adapter
+described above persists API-driven execution snapshots and events. This does
+not add parallelism, retries, worker infrastructure, or restart recovery.
+Tool execution is synchronous; elapsed-time limits are checked after a handler
+returns and cannot interrupt a stuck handler. The current tool contract has no
+risk-classification or approval/resume workflow, so it enforces registration,
+capability, schema, and size policy but does not claim approval gating for side
+effects.
 
 Example:
 
@@ -315,13 +355,14 @@ agent payloads are not included in returned execution state. Developers still
 receive structured log context with IDs, agent role, category, and exception
 class.
 
-Terminal snapshots are kept in a bounded in-memory history. `get_execution(id)`
-returns a detached snapshot or raises `ExecutionNotFoundError`;
-`list_executions(limit=...)` returns recent terminal executions newest first.
-Returned snapshots cannot mutate stored history. History, active executions,
-and cancellation requests are process-local and are lost on restart. There
-are no Day 8 API endpoints, database writes/migrations, retries, worker
-coordination, or restart recovery.
+Terminal snapshots are kept in a bounded in-memory history.
+`get_execution(id)` returns a detached snapshot or raises
+`ExecutionNotFoundError`; `list_executions(limit=...)` returns recent terminal
+executions newest first. Returned snapshots cannot mutate stored history.
+This history, active engine objects, and cancellation requests are process-local
+and are lost on restart. The Day 12 API separately persists and reconstructs
+execution snapshots; it does not rehydrate in-memory engine objects. There are
+no retries, worker coordination, or automatic restart recovery.
 
 Example:
 

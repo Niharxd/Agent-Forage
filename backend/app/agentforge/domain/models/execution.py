@@ -33,7 +33,7 @@ class WorkflowExecution(Base):
     __table_args__ = (
         CheckConstraint(
             "status IN ('submitted', 'planning', 'planned', 'queued', 'running', "
-            "'waiting_approval', 'succeeded', 'failed', 'cancelled')",
+            "'waiting_approval', 'succeeded', 'failed', 'cancelled', 'pending', 'completed')",
             name="ck_workflow_executions_status",
         ),
         CheckConstraint(
@@ -41,7 +41,8 @@ class WorkflowExecution(Base):
             name="ck_execution_plan_version",
         ),
         CheckConstraint(
-            "status NOT IN ('succeeded', 'failed', 'cancelled') OR completed_at IS NOT NULL",
+            "status NOT IN ('succeeded', 'failed', 'cancelled', 'completed') "
+            "OR completed_at IS NOT NULL",
             name="ck_terminal_execution_has_completion_time",
         ),
     )
@@ -90,7 +91,7 @@ class WorkflowExecution(Base):
     events: Mapped[list["ExecutionEvent"]] = relationship(
         back_populates="execution",
         passive_deletes="all",
-        order_by="ExecutionEvent.occurred_at",
+        order_by="ExecutionEvent.sequence_number",
     )
 
 
@@ -108,7 +109,7 @@ class ExecutionStep(Base):
         CheckConstraint("attempt_number > 0", name="ck_execution_steps_positive_attempt"),
         CheckConstraint(
             "status IN ('pending', 'running', 'waiting_approval', 'succeeded', "
-            "'failed', 'cancelled')",
+            "'failed', 'cancelled', 'completed', 'blocked', 'skipped')",
             name="ck_execution_steps_status",
         ),
     )
@@ -244,6 +245,13 @@ class ExecutionEvent(Base):
     """Append-only lifecycle and audit event for an execution."""
 
     __tablename__ = "execution_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_id",
+            "sequence_number",
+            name="uq_execution_events_sequence",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True),
@@ -257,6 +265,7 @@ class ExecutionEvent(Base):
         nullable=False,
         index=True,
     )
+    sequence_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
     from_status: Mapped[str | None] = mapped_column(String(30))
     to_status: Mapped[str | None] = mapped_column(String(30))

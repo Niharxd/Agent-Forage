@@ -203,7 +203,7 @@ def test_initial_snapshot_is_serializable_and_contains_pending_task_state() -> N
     assert snapshot.completed_at is None
     assert snapshot.created_at.tzinfo is not None
     assert snapshot.task_results["one"].status == TaskStatus.PENDING
-    assert snapshot.events == []
+    assert [event.event_type for event in snapshot.events] == [WorkflowEventType.WORKFLOW_CREATED]
     assert serialized == snapshot
 
 
@@ -220,7 +220,10 @@ def test_successful_snapshot_captures_lifecycle_results_and_order() -> None:
     assert snapshot.started_at is not None and snapshot.completed_at is not None
     assert snapshot.execution_order == ["a", "b"]
     assert all(result.status == TaskStatus.COMPLETED for result in snapshot.task_results.values())
-    assert [event.event_type for event in snapshot.events][0] == WorkflowEventType.WORKFLOW_STARTED
+    assert [event.event_type for event in snapshot.events][:2] == [
+        WorkflowEventType.WORKFLOW_CREATED,
+        WorkflowEventType.WORKFLOW_STARTED,
+    ]
     assert snapshot.events[-1].event_type == WorkflowEventType.WORKFLOW_COMPLETED
 
 
