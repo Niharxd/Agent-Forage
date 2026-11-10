@@ -11,7 +11,11 @@ from agentforge.api.schemas import WorkflowResponse
 from agentforge.config.settings import Settings
 from agentforge.database.dependencies import get_db_session
 from agentforge.domain.agents import AgentRole
-from agentforge.domain.workflows.models import WorkflowDefinition, WorkflowExecutionSnapshot
+from agentforge.domain.workflows.models import (
+    WorkflowDefinition,
+    WorkflowExecutionSnapshot,
+    WorkflowStatus,
+)
 from agentforge.main import create_app
 from agentforge.workflow import ExecutionNotFoundError, WorkflowEngine
 from fastapi import FastAPI
@@ -42,12 +46,29 @@ def api(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, WorkflowEngine, Fa
                 raise ExecutionNotFoundError
             return snapshot.model_copy(deep=True)
 
-        def list_executions(self, *, limit: int, offset: int):
+        def list_executions(
+            self,
+            *,
+            limit: int,
+            offset: int,
+            status: WorkflowStatus | None = None,
+            search: str | None = None,
+        ):
             records = sorted(
                 stored_executions.values(),
                 key=lambda item: (item.created_at, str(item.execution_id)),
                 reverse=True,
             )
+            if status is not None:
+                records = [item for item in records if item.status == status]
+            if search and search.strip():
+                query = search.strip().casefold()
+                records = [
+                    item
+                    for item in records
+                    if query in str(item.execution_id).casefold()
+                    or query in item.workflow_name.casefold()
+                ]
             return [item.model_copy(deep=True) for item in records[offset : offset + limit]], len(
                 records
             )
@@ -214,6 +235,39 @@ def test_execution_create_start_get_list_and_task_results(api) -> None:
     retrieved_after_engine_replacement = client.get(f"/api/v1/executions/{execution_id}")
     assert retrieved_after_engine_replacement.status_code == 200
     assert retrieved_after_engine_replacement.json()["status"] == "completed"
+
+
+def test_execution_list_filters_are_validated_and_applied(api) -> None:
+    client, _, _ = api
+    completed_workflow = client.post(
+        "/api/v1/workflows",
+        json=workflow_body("completed-search-target"),
+    ).json()
+    completed = client.post(f"/api/v1/workflows/{completed_workflow['id']}/executions").json()
+    client.post(f"/api/v1/executions/{completed['execution_id']}/start")
+
+    pending_workflow = client.post(
+        "/api/v1/workflows",
+        json=workflow_body("pending-search-target"),
+    ).json()
+    pending = client.post(f"/api/v1/workflows/{pending_workflow['id']}/executions").json()
+
+    filtered = client.get(
+        "/api/v1/executions",
+        params={"status": "completed", "search": "COMPLETED-SEARCH"},
+    )
+    assert filtered.status_code == 200
+    assert filtered.json()["total"] == 1
+    assert filtered.json()["items"][0]["execution_id"] == completed["execution_id"]
+
+    pending_results = client.get("/api/v1/executions", params={"status": "pending"})
+    assert pending_results.status_code == 200
+    assert [item["execution_id"] for item in pending_results.json()["items"]] == [
+        pending["execution_id"]
+    ]
+
+    assert client.get("/api/v1/executions", params={"status": "unknown"}).status_code == 422
+    assert client.get("/api/v1/executions", params={"search": "x" * 201}).status_code == 422
 
 
 def test_pending_execution_can_be_cancelled_and_terminal_transitions_rejected(api) -> None:

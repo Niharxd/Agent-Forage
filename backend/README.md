@@ -114,7 +114,7 @@ SQLAlchemy models and raw exception messages are not returned.
 | `POST` | `/workflows/validate` | Validate the definition and tool permissions without persisting it; returns `valid` and safe issue codes/locations. |
 | `POST` | `/workflows/{workflow_id}/executions` | Persist a pending execution and task records without invoking agents or tools. |
 | `POST` | `/executions/{execution_id}/start` | Explicitly run pending work through the existing orchestrator and workflow engine. |
-| `GET` | `/executions?limit=50&offset=0` | List persisted executions with database-backed pagination. |
+| `GET` | `/executions?limit=50&offset=0` | List persisted executions with database-backed pagination; optional `status` and case-insensitive `search` filters match workflow names or execution IDs. |
 | `GET` | `/executions/{execution_id}` | Reconstruct execution status, lifecycle events, task-level results, and execution order from PostgreSQL. |
 | `POST` | `/executions/{execution_id}/cancel` | Cancel pending work or request cooperative cancellation while running. |
 
@@ -162,6 +162,10 @@ Database writes cannot be atomic with external agent/tool side effects. If an
 agent/tool completes and its following persistence transaction fails, the
 database remains at the last committed state and the API reports failure; the
 side-effect outcome may be ambiguous and must not be automatically retried.
+
+The Vite development server proxies `/api` to `http://127.0.0.1:8000`. Run the
+backend on that address while using the live execution history screen. A
+deployed frontend must route `/api` to the backend on the same origin.
 
 The Day 12 migration adds the engine's `pending`/`completed` workflow and
 `completed`/`blocked`/`skipped` task states to existing constraints and adds a

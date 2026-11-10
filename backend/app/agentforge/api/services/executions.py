@@ -3,7 +3,7 @@
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from agentforge.domain.models import ExecutionEvent, ExecutionStep, WorkflowExecution
@@ -188,16 +188,36 @@ class ExecutionRepository:
         *,
         limit: int,
         offset: int,
+        status: WorkflowStatus | None = None,
+        search: str | None = None,
     ) -> tuple[list[WorkflowExecutionSnapshot], int]:
-        """Return persisted executions in newest-first paginated order."""
-        executions_query = select(WorkflowExecution).where(
-            WorkflowExecution.status.in_(_API_WORKFLOW_STATUSES)
+        """Return filtered persisted executions in newest-first paginated order."""
+        filters = [WorkflowExecution.status.in_(_API_WORKFLOW_STATUSES)]
+        if status is not None:
+            filters.append(WorkflowExecution.status == status.value)
+        if search and search.strip():
+            escaped_search = (
+                search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+            search_pattern = f"%{escaped_search}%"
+            filters.append(
+                or_(
+                    cast(WorkflowExecution.id, String).ilike(search_pattern, escape="\\"),
+                    Workflow.name.ilike(search_pattern, escape="\\"),
+                )
+            )
+
+        executions_query = (
+            select(WorkflowExecution)
+            .join(Workflow, WorkflowExecution.workflow_id == Workflow.id)
+            .where(*filters)
         )
         total = (
             self._session.scalar(
                 select(func.count())
                 .select_from(WorkflowExecution)
-                .where(WorkflowExecution.status.in_(_API_WORKFLOW_STATUSES))
+                .join(Workflow, WorkflowExecution.workflow_id == Workflow.id)
+                .where(*filters)
             )
             or 0
         )

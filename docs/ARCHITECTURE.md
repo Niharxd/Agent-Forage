@@ -147,9 +147,19 @@ The Day 11 API exposes versioned workflow definitions and the existing in-proces
 | `POST` | `/api/v1/workflows/validate` | Validate a definition and its declared tool permissions without persisting it. |
 | `POST` | `/api/v1/workflows/{workflow_id}/executions` | Persist a pending execution, initial task rows, and creation event; no agent or tool runs yet. |
 | `POST` | `/api/v1/executions/{execution_id}/start` | Start a pending execution synchronously through the orchestrator and engine. |
-| `GET` | `/api/v1/executions` | List persisted executions with database pagination. |
+| `GET` | `/api/v1/executions` | List persisted executions with database pagination and optional status/name/ID filters. |
 | `GET` | `/api/v1/executions/{execution_id}` | Reconstruct status, task results, events, timestamps, and execution order from PostgreSQL. |
 | `POST` | `/api/v1/executions/{execution_id}/cancel` | Cancel pending work or request cooperative cancellation of running work. |
+
+The Day 13 dashboard slice replaces execution-history fixtures with the
+persisted list and detail APIs. History is paginated and can be filtered by
+status or case-insensitive workflow-name/execution-ID search. Opening a row
+loads task states, safe error messages, and ordered lifecycle events; raw task
+payloads and tool arguments are not rendered. List and detail failures remain
+visible with retry controls. The Vite development server proxies `/api` to the
+local API; deployed frontends must route the same path. Workflow authoring,
+plan visualization, approval handling, and active execution recovery remain
+outside this slice.
 
 Workflow definitions use the domain Pydantic contracts and validator; tool
 requests are preflighted through the engine's registered-tool and capability

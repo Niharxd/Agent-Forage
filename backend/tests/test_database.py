@@ -441,6 +441,107 @@ def test_completed_execution_reconstructs_results_timestamps_and_event_order(
     assert persisted_event_count == len(reconstructed.events)
 
 
+def test_execution_list_filters_search_and_pagination_use_postgresql(
+    migrated_database: Engine,
+) -> None:
+    with Session(migrated_database) as session:
+        first_workflow, first_engine, first_repository, first_pending = _create_persisted_execution(
+            session, definition=_one_task_definition()
+        )
+        first_workflow.name = "Dashboard Search Alpha"
+        session.commit()
+        first_engine.run(
+            first_pending.execution_id,
+            on_update=first_repository.synchronize_execution,
+        )
+
+        second_workflow, _, _, second_pending = _create_persisted_execution(
+            session,
+            definition=_one_task_definition(),
+        )
+        second_workflow.name = "Dashboard Search Beta"
+        session.commit()
+
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        completed, completed_total = repository.list_executions(
+            limit=10,
+            offset=0,
+            status=WorkflowStatus.COMPLETED,
+            search="Dashboard Search",
+        )
+        by_workflow, workflow_total = repository.list_executions(
+            limit=10,
+            offset=0,
+            search="dashboard search beta",
+        )
+        by_id, id_total = repository.list_executions(
+            limit=10,
+            offset=0,
+            search=str(first_pending.execution_id)[:12],
+        )
+        all_records, all_total = repository.list_executions(
+            limit=10,
+            offset=0,
+            search="Dashboard Search",
+        )
+        page, page_total = repository.list_executions(
+            limit=1,
+            offset=1,
+            search="Dashboard Search",
+        )
+
+    assert completed_total == 1
+    assert [execution.execution_id for execution in completed] == [first_pending.execution_id]
+    assert workflow_total == 1
+    assert [execution.execution_id for execution in by_workflow] == [second_pending.execution_id]
+    assert id_total == 1
+    assert [execution.execution_id for execution in by_id] == [first_pending.execution_id]
+    assert all_total == 2
+    assert page_total == 2
+    assert len(page) == 1
+    assert page[0].execution_id == all_records[1].execution_id
+
+
+def test_execution_search_treats_like_wildcards_as_literals(migrated_database: Engine) -> None:
+    prefix = f"literal-search-{uuid4().hex}-"
+    workflow_names = [
+        f"{prefix}percent%token",
+        f"{prefix}percentXtoken",
+        f"{prefix}under_score",
+        f"{prefix}underXscore",
+        f"{prefix}slash\\token",
+        f"{prefix}slash/token",
+    ]
+
+    with Session(migrated_database) as session:
+        expected_ids = {}
+        for name in workflow_names:
+            workflow, _, _, snapshot = _create_persisted_execution(
+                session,
+                definition=_one_task_definition(),
+            )
+            workflow.name = name
+            expected_ids[name] = snapshot.execution_id
+        session.commit()
+
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        searches = {
+            f"{prefix}percent%token": expected_ids[workflow_names[0]],
+            f"{prefix}under_score": expected_ids[workflow_names[2]],
+            f"{prefix}slash\\token": expected_ids[workflow_names[4]],
+        }
+        for query, expected_id in searches.items():
+            matches, total = repository.list_executions(
+                limit=10,
+                offset=0,
+                search=query,
+            )
+            assert total == 1
+            assert [execution.execution_id for execution in matches] == [expected_id]
+
+
 def test_failed_and_blocked_task_states_reconstruct_from_database(
     migrated_database: Engine,
 ) -> None:

@@ -11,7 +11,11 @@ from agentforge.api.schemas import ExecutionListResponse, ExecutionResponse, Pag
 from agentforge.api.services.executions import ExecutionRepository
 from agentforge.api.services.workflows import get_workflow
 from agentforge.database.dependencies import get_db_session
-from agentforge.domain.workflows.models import WorkflowExecution, WorkflowExecutionSnapshot
+from agentforge.domain.workflows.models import (
+    WorkflowExecution,
+    WorkflowExecutionSnapshot,
+    WorkflowStatus,
+)
 from agentforge.domain.workflows.validation import WorkflowValidationError
 from agentforge.workflow.engine import (
     ExecutionNotFoundError,
@@ -97,9 +101,16 @@ def get_executions(
     session: Annotated[Session, Depends(get_db_session)],
     limit: PageLimit = Query(default=50),
     offset: Annotated[int, Query(ge=0)] = 0,
+    status: WorkflowStatus | None = None,
+    search: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
 ) -> ExecutionListResponse:
-    """List persisted executions with database-backed pagination."""
-    snapshots, total = ExecutionRepository(session).list_executions(limit=limit, offset=offset)
+    """List persisted executions with database-backed pagination and filters."""
+    snapshots, total = ExecutionRepository(session).list_executions(
+        limit=limit,
+        offset=offset,
+        status=status,
+        search=search,
+    )
     return ExecutionListResponse(
         items=[_execution_response(item) for item in snapshots],
         total=total,
