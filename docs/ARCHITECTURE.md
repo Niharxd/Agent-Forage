@@ -156,10 +156,14 @@ persisted list and detail APIs. History is paginated and can be filtered by
 status or case-insensitive workflow-name/execution-ID search. Opening a row
 loads task states, safe error messages, and ordered lifecycle events; raw task
 payloads and tool arguments are not rendered. List and detail failures remain
-visible with retry controls. The Vite development server proxies `/api` to the
-local API; deployed frontends must route the same path. Workflow authoring,
-plan visualization, approval handling, and active execution recovery remain
-outside this slice.
+visible with retry controls. Day 14 extends execution detail with a safe plan
+projection containing only task IDs, agent roles, dependency IDs, and persisted
+task states. The dashboard renders that projection as a dependency graph and
+an accessible textual summary; inputs, tool arguments, task descriptions, and
+outputs are not part of the projection. Workflow authoring, approval handling,
+and active execution recovery remain outside this slice. The Vite development
+server proxies `/api` to the local API; deployed frontends must route the same
+path.
 
 Workflow definitions use the domain Pydantic contracts and validator; tool
 requests are preflighted through the engine's registered-tool and capability

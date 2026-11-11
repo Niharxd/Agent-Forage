@@ -29,13 +29,15 @@ def api(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, WorkflowEngine, Fa
     workflow_engine = WorkflowEngine(settings=settings)
     stored_workflows: dict[UUID, WorkflowResponse] = {}
     stored_executions: dict[UUID, WorkflowExecutionSnapshot] = {}
+    execution_definitions: dict[UUID, WorkflowDefinition] = {}
 
     class FakeExecutionRepository:
         def __init__(self, _session) -> None:
             pass
 
-        def create_execution(self, snapshot, **_values) -> None:
+        def create_execution(self, snapshot, *, definition, **_values) -> None:
             stored_executions[snapshot.execution_id] = snapshot.model_copy(deep=True)
+            execution_definitions[snapshot.execution_id] = definition
 
         def synchronize_execution(self, snapshot) -> None:
             stored_executions[snapshot.execution_id] = snapshot.model_copy(deep=True)
@@ -45,6 +47,9 @@ def api(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, WorkflowEngine, Fa
             if snapshot is None:
                 raise ExecutionNotFoundError
             return snapshot.model_copy(deep=True)
+
+        def get_execution_details(self, execution_id: UUID):
+            return self.get_execution(execution_id), execution_definitions[execution_id]
 
         def list_executions(
             self,
@@ -283,6 +288,55 @@ def test_pending_execution_can_be_cancelled_and_terminal_transitions_rejected(ap
 
     invalid_cancel = client.post(f"/api/v1/executions/{execution_id}/cancel")
     assert invalid_cancel.status_code == 409
+
+
+def test_execution_detail_includes_only_safe_plan_metadata(api) -> None:
+    client, _, _ = api
+    private_input = "private-input-marker"
+    private_description = "private-description-marker"
+    payload = {
+        "name": f"safe-plan-{uuid4().hex}",
+        "description": "Workflow for safe plan projection.",
+        "tasks": [
+            {
+                "task_id": "collect",
+                "agent_type": "researcher",
+                "description": private_description,
+                "input_data": {"private_value": private_input},
+            },
+            {
+                "task_id": "summarize",
+                "agent_type": "analyst",
+                "dependency_ids": ["collect"],
+                "input_data": {"internal_note": private_input},
+            },
+        ],
+    }
+    workflow = client.post("/api/v1/workflows", json=payload).json()
+    pending = client.post(f"/api/v1/workflows/{workflow['id']}/executions").json()
+
+    response = client.get(f"/api/v1/executions/{pending['execution_id']}")
+
+    assert response.status_code == 200
+    assert response.json()["workflow_plan"] == [
+        {
+            "task_id": "collect",
+            "agent_type": "researcher",
+            "dependency_ids": [],
+            "status": "pending",
+        },
+        {
+            "task_id": "summarize",
+            "agent_type": "analyst",
+            "dependency_ids": ["collect"],
+            "status": "pending",
+        },
+    ]
+    plan_text = str(response.json()["workflow_plan"])
+    assert private_input not in plan_text
+    assert private_description not in plan_text
+    assert "input_data" not in plan_text
+    assert "tool_request" not in plan_text
 
 
 def test_persistence_failure_never_returns_execution_success(api, monkeypatch) -> None:

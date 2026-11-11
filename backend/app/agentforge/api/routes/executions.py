@@ -7,11 +7,17 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from agentforge.api.dependencies import get_workflow_engine, get_workflow_orchestrator
-from agentforge.api.schemas import ExecutionListResponse, ExecutionResponse, PageLimit
+from agentforge.api.schemas import (
+    ExecutionListResponse,
+    ExecutionPlanTask,
+    ExecutionResponse,
+    PageLimit,
+)
 from agentforge.api.services.executions import ExecutionRepository
 from agentforge.api.services.workflows import get_workflow
 from agentforge.database.dependencies import get_db_session
 from agentforge.domain.workflows.models import (
+    WorkflowDefinition,
     WorkflowExecution,
     WorkflowExecutionSnapshot,
     WorkflowStatus,
@@ -29,9 +35,21 @@ router = APIRouter(tags=["executions"])
 
 def _execution_response(
     execution: WorkflowExecution | WorkflowExecutionSnapshot,
+    workflow_definition: WorkflowDefinition | None = None,
 ) -> ExecutionResponse:
     snapshot = execution.snapshot() if isinstance(execution, WorkflowExecution) else execution
-    return ExecutionResponse.model_validate(snapshot.model_dump(mode="python"))
+    response_data = snapshot.model_dump(mode="python")
+    if workflow_definition is not None:
+        response_data["workflow_plan"] = [
+            ExecutionPlanTask(
+                task_id=task.task_id,
+                agent_type=task.agent_type,
+                dependency_ids=task.dependency_ids,
+                status=snapshot.task_results[task.task_id].status,
+            ).model_dump(mode="python")
+            for task in workflow_definition.tasks
+        ]
+    return ExecutionResponse.model_validate(response_data)
 
 
 @router.post(
@@ -124,12 +142,14 @@ def get_execution(
     execution_id: UUID,
     session: Annotated[Session, Depends(get_db_session)],
 ) -> ExecutionResponse:
-    """Reconstruct an execution's state, events, and task-level results from PostgreSQL."""
+    """Reconstruct persisted execution details and its safe plan projection."""
     try:
-        snapshot = ExecutionRepository(session).get_execution(execution_id)
+        snapshot, workflow_definition = ExecutionRepository(session).get_execution_details(
+            execution_id
+        )
     except ExecutionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Execution not found.") from exc
-    return _execution_response(snapshot)
+    return _execution_response(snapshot, workflow_definition)
 
 
 @router.post("/executions/{execution_id}/cancel", response_model=ExecutionResponse)

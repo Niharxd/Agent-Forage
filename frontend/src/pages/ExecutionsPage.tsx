@@ -9,6 +9,7 @@ import { SearchInput } from "../components/SearchInput";
 import { StatusBadge } from "../components/StatusBadge";
 import { DataTable } from "../components/DataTable";
 import { Dropdown } from "../components/Dropdown";
+import { WorkflowPlanGraph } from "../components/WorkflowPlanGraph";
 
 const PAGE_SIZE = 25;
 
@@ -82,6 +83,20 @@ function ExecutionDetails({ execution }: { execution: Execution }) {
         </div>
         <StatusBadge tone={statusTone(execution.status)}>{statusLabels[execution.status]}</StatusBadge>
       </div>
+
+      {execution.workflow_plan ? (
+        <div>
+          <h3 className="mb-1 text-sm font-semibold text-[var(--text)]">Workflow plan</h3>
+          <p className="mb-3 text-xs text-[var(--secondary)]">
+            Dependency graph and task states. Task inputs and tool arguments are not displayed.
+          </p>
+          {execution.workflow_plan.length > 0 ? (
+            <WorkflowPlanGraph tasks={execution.workflow_plan} />
+          ) : (
+            <p className="text-sm text-[var(--secondary)]">No plan details are available.</p>
+          )}
+        </div>
+      ) : null}
 
       <div>
         <h3 className="mb-3 text-sm font-semibold text-[var(--text)]">Tasks</h3>

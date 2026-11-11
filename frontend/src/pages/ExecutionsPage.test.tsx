@@ -60,6 +60,14 @@ function executionRecord(id = executionId, workflowName = "Dashboard research") 
     ],
     execution_order: ["analyze"],
     cancellation_requested: false,
+    workflow_plan: [
+      {
+        task_id: "analyze",
+        agent_type: "analyst",
+        dependency_ids: [],
+        status: "completed",
+      },
+    ],
   };
 }
 
@@ -260,9 +268,46 @@ describe("ExecutionsPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: `View execution ${executionId}` }));
 
     expect(await screen.findByRole("region", { name: `Execution details for ${executionId}` })).toBeInTheDocument();
-    expect(screen.getByText("analyze")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "analyze" })).toBeInTheDocument();
     expect(screen.getByText(/analyst · Started .* · Completed /)).toBeInTheDocument();
     expect(screen.getByText("workflow completed")).toBeInTheDocument();
+    expect(screen.queryByText("Persisted result")).not.toBeInTheDocument();
+  });
+
+  it("visualizes workflow dependencies and task status from the safe plan projection", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const record = {
+      ...executionRecord(),
+      workflow_plan: [
+        {
+          task_id: "collect",
+          agent_type: "researcher",
+          dependency_ids: [],
+          status: "completed",
+        },
+        {
+          task_id: "analyze",
+          agent_type: "analyst",
+          dependency_ids: ["collect"],
+          status: "running",
+        },
+      ],
+    };
+    fetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      return url.includes(executionId)
+        ? jsonResponse(record)
+        : jsonResponse(executionList([record]));
+    });
+    render(<ExecutionsPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: `View execution ${executionId}` }));
+
+    expect(await screen.findByRole("heading", { name: "Workflow plan" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Workflow dependency graph" })).toBeInTheDocument();
+    expect(screen.getByText(/Depends on: collect/)).toBeInTheDocument();
+    expect(screen.getByText("researcher · completed")).toBeInTheDocument();
+    expect(screen.getByText("analyst · running")).toBeInTheDocument();
     expect(screen.queryByText("Persisted result")).not.toBeInTheDocument();
   });
 

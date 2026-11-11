@@ -15,6 +15,13 @@ export type ExecutionTaskResult = {
   completed_at: string | null;
 };
 
+export type ExecutionPlanTask = {
+  task_id: string;
+  agent_type: string;
+  dependency_ids: string[];
+  status: "pending" | "running" | "completed" | "failed" | "blocked" | "skipped";
+};
+
 export type ExecutionEvent = {
   event_type: string;
   execution_id: string;
@@ -37,6 +44,7 @@ export type Execution = {
   events: ExecutionEvent[];
   execution_order: string[];
   cancellation_requested: boolean;
+  workflow_plan?: ExecutionPlanTask[] | null;
 };
 
 export type ExecutionListResponse = {

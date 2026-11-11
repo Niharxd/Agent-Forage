@@ -746,7 +746,18 @@ def test_persisted_execution_api_survives_engine_history_replacement(
     payload = {
         "name": f"api-execution-{uuid4().hex}",
         "description": "Persisted API execution.",
-        "tasks": [{"task_id": "analyze", "agent_type": "analyst"}],
+        "tasks": [
+            {
+                "task_id": "gather",
+                "agent_type": "analyst",
+                "input_data": {"private_marker": "do-not-return"},
+            },
+            {
+                "task_id": "analyze",
+                "agent_type": "analyst",
+                "dependency_ids": ["gather"],
+            },
+        ],
     }
 
     with TestClient(application) as client:
@@ -771,6 +782,21 @@ def test_persisted_execution_api_survives_engine_history_replacement(
     assert retrieved.status_code == 200
     assert retrieved.json()["execution_id"] == execution_id
     assert retrieved.json()["events"][-1]["event_type"] == "workflow_completed"
+    assert retrieved.json()["workflow_plan"] == [
+        {
+            "task_id": "gather",
+            "agent_type": "analyst",
+            "dependency_ids": [],
+            "status": "completed",
+        },
+        {
+            "task_id": "analyze",
+            "agent_type": "analyst",
+            "dependency_ids": ["gather"],
+            "status": "completed",
+        },
+    ]
+    assert "do-not-return" not in str(retrieved.json()["workflow_plan"])
     assert listing.status_code == 200
     assert listing.json()["total"] >= 2
     assert cancellation.status_code == 200

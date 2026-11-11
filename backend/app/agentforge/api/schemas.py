@@ -6,8 +6,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from agentforge.domain.agents import AgentRole
 from agentforge.domain.workflows.models import (
     TaskExecutionResult,
+    TaskStatus,
     WorkflowDefinition,
     WorkflowEvent,
     WorkflowStatus,
@@ -59,6 +61,15 @@ class WorkflowValidationResponse(BaseModel):
     issues: list[WorkflowValidationIssueResponse] = Field(default_factory=list)
 
 
+class ExecutionPlanTask(BaseModel):
+    """Safe task metadata used to visualize an execution's persisted plan."""
+
+    task_id: str
+    agent_type: AgentRole
+    dependency_ids: list[str]
+    status: TaskStatus
+
+
 class ExecutionResponse(BaseModel):
     """Reconstructed execution state and task results from durable records."""
 
@@ -74,6 +85,7 @@ class ExecutionResponse(BaseModel):
     events: list[WorkflowEvent]
     execution_order: list[str]
     cancellation_requested: bool
+    workflow_plan: list[ExecutionPlanTask] | None = None
 
 
 class ExecutionListResponse(BaseModel):

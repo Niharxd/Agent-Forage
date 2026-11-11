@@ -183,6 +183,22 @@ class ExecutionRepository:
             raise ExecutionNotFoundError(f"Execution {execution_id} was not found.")
         return self._snapshot(record)
 
+    def get_execution_details(
+        self, execution_id: UUID
+    ) -> tuple[WorkflowExecutionSnapshot, WorkflowDefinition]:
+        """Return persisted execution state and its validated workflow definition."""
+        record = self._load_execution(execution_id)
+        if record is None:
+            raise ExecutionNotFoundError(f"Execution {execution_id} was not found.")
+        if record.workflow is None:
+            raise ExecutionPersistenceError(
+                "The durable execution record is incomplete or invalid."
+            )
+        return (
+            self._snapshot(record),
+            WorkflowDefinition.model_validate(record.workflow.workflow_definition),
+        )
+
     def list_executions(
         self,
         *,
