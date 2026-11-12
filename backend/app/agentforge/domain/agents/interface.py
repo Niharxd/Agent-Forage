@@ -35,6 +35,11 @@ class Agent(ABC):
     """Simple synchronous contract implemented by every specialized agent."""
 
     @property
+    def execution_mode(self) -> str:
+        """Identify the execution mode for safe invocation metadata."""
+        return "deterministic_mock"
+
+    @property
     @abstractmethod
     def identity(self) -> AgentIdentity:
         """Return this implementation's stable identity and declared metadata."""
@@ -95,7 +100,7 @@ class Agent(ABC):
             output=output,
             execution_duration_ms=self._duration_ms(started_at),
             error=output.error,
-            metadata={"execution_mode": "deterministic_mock"},
+            metadata={"execution_mode": self.execution_mode},
         )
 
     @abstractmethod
@@ -114,7 +119,7 @@ class Agent(ABC):
             output=output,
             execution_duration_ms=self._duration_ms(started_at),
             error=error,
-            metadata={"execution_mode": "deterministic_mock"},
+            metadata={"execution_mode": self.execution_mode},
         )
 
     @staticmethod

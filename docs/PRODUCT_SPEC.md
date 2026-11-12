@@ -24,6 +24,7 @@ The initial release is a single-operator, self-hosted MVP for bounded workflows.
 - Approval gates for sensitive or externally visible tool actions.
 - Bounded retries and timeouts, explicit failure states, and step-level logs.
 - PostgreSQL persistence, a React dashboard, and a mock LLM provider usable without paid credentials.
+- An opt-in OpenAI Planner adapter and a capability-gated, read-only English Wikipedia search tool; mock mode remains the default.
 - Automated backend and frontend tests, local Docker-based development, and CI.
 
 ### Not in the MVP
@@ -64,6 +65,7 @@ The initial release is a single-operator, self-hosted MVP for bounded workflows.
 - **Testability:** orchestration and policy tests run against the mock provider and fake tools without network access or paid APIs.
 - **Maintainability:** provider, tool, persistence, API, and UI boundaries are explicit; schemas are versioned so saved executions remain interpretable.
 - **Security:** credentials are supplied out of band, protected in transit in deployed environments, excluded from logs and persisted user-visible output, and never included in source control.
+- **External data:** when OpenAI mode is enabled, only the Planner task description is sent to OpenAI; a Wikipedia tool request sends only its bounded query to English Wikipedia. Operators must not submit secrets or sensitive data to either integration.
 
 ## Workflow lifecycle
 

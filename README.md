@@ -4,10 +4,11 @@ AgentForge is a self-hosted application for turning a task into an inspectable,
 validated workflow. The approved scope, architecture, roadmap, and threat model
 are documented in [`docs/`](docs/).
 
-The backend provides a versioned FastAPI health API, environment-backed
-settings, standardized error responses, and the PostgreSQL persistence
-foundation. Workflow execution, provider integrations, authentication, and
-dashboard features have not been implemented.
+The backend provides versioned workflow and execution APIs, PostgreSQL-backed
+workflow/execution history, a bounded sequential engine, and a React dashboard
+with execution history and dependency-graph visualization. Mock agents remain
+the default. Day 15 adds an optional OpenAI Planner adapter and an explicitly
+requested, read-only Wikipedia search tool.
 
 ## Repository layout
 
@@ -23,15 +24,14 @@ dashboard features have not been implemented.
 Within `backend/app/agentforge/`, `main.py` creates the FastAPI application,
 `api/routes/` contains versioned HTTP endpoints, and `config/` contains
 environment-backed settings. `database/` and `domain/models/` provide
-PostgreSQL persistence and SQLAlchemy models; `workflow/` is reserved for
-orchestration; and `agents/`, `tools/`, and `providers/` for their respective
-interfaces and adapters. See [`backend/README.md`](backend/README.md) for
-database setup and migration commands.
+PostgreSQL persistence and SQLAlchemy models; `workflow/` contains the bounded
+orchestration engine; and `agents/`, `tools/`, and `providers/` contain their
+respective interfaces and adapters. See [`backend/README.md`](backend/README.md)
+for database setup and migration commands.
 
 The frontend source lives under `frontend/src/`: `components/` for reusable UI,
-`pages/` for screens, `api/` for API clients, `hooks/` for shared React hooks,
-`types/` for TypeScript contracts, and `styles/` for global styling. The
-current page is only a build/test scaffold.
+`pages/` for screens, `api/` for API clients, `theme/` for theme state, and
+`styles/` for global styling.
 
 ## Prerequisites
 
@@ -60,6 +60,18 @@ array of explicitly allowed HTTP(S) origins; leave it empty (`[]`) to disable
 cross-origin access. Configure the database URLs and start PostgreSQL as
 described in [`backend/README.md`](backend/README.md). Do not commit `.env` or
 put real credentials in it when sharing logs or examples.
+
+Provider use is opt-in. Keep `PROVIDER_MODE=mock` for deterministic, offline
+operation. To use the OpenAI Planner adapter, set `PROVIDER_MODE=openai` and
+provide `OPENAI_API_KEY` and a long random `API_ACCESS_TOKEN`;
+`OPENAI_MODEL` and `OPENAI_TIMEOUT_SECONDS` have safe defaults. Workflow and
+execution API routes require that bearer token while OpenAI mode is enabled;
+health endpoints remain public. Only the Planner task description is sent to
+OpenAI, and only after explicit workflow start. A `wikipedia_search` tool
+request sends its bounded query to English Wikipedia after start. Neither
+integration accepts arbitrary URLs; do not submit credentials or other
+sensitive data as task/query content. No provider credentials are needed for
+tests.
 
 ## Start the backend
 

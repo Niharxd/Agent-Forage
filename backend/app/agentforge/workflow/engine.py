@@ -9,6 +9,7 @@ from threading import RLock
 from uuid import UUID, uuid4
 
 from agentforge.agents import AnalystAgent, PlannerAgent, ResearcherAgent, ReviewerAgent
+from agentforge.agents.openai_planner import OpenAIPlannerAgent
 from agentforge.config.settings import Settings
 from agentforge.domain.agents.contracts import (
     AgentCapability,
@@ -38,6 +39,7 @@ from agentforge.domain.workflows.validation import (
     WorkflowValidationIssue,
     WorkflowValidator,
 )
+from agentforge.providers.openai import OpenAIChatCompletionsProvider
 from agentforge.tools import (
     ToolExecutionRequest,
     ToolExecutionResult,
@@ -86,7 +88,7 @@ class WorkflowEngine:
         tool_executor: ToolExecutor | None = None,
     ) -> None:
         settings = settings or Settings()
-        self._agents = dict(agents) if agents is not None else self._mock_agents()
+        self._agents = dict(agents) if agents is not None else self._configured_agents(settings)
         self._validator = validator or WorkflowValidator(
             max_tasks=settings.workflow_max_tasks,
             max_task_input_bytes=settings.workflow_max_task_input_bytes,
@@ -887,9 +889,21 @@ class WorkflowEngine:
         return len(encoded)
 
     @staticmethod
-    def _mock_agents() -> dict[AgentRole, Agent]:
+    def _configured_agents(settings: Settings) -> dict[AgentRole, Agent]:
+        planner: Agent = PlannerAgent()
+        if settings.provider_mode == "openai":
+            api_key = settings.openai_api_key
+            if api_key is None:
+                raise ValueError("OPENAI_API_KEY is required when PROVIDER_MODE is openai")
+            planner = OpenAIPlannerAgent(
+                OpenAIChatCompletionsProvider(
+                    api_key=api_key,
+                    model=settings.openai_model,
+                    timeout_seconds=settings.openai_timeout_seconds,
+                )
+            )
         agents: tuple[Agent, ...] = (
-            PlannerAgent(),
+            planner,
             ResearcherAgent(),
             AnalystAgent(),
             ReviewerAgent(),

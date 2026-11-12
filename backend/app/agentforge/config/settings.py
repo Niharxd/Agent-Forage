@@ -1,9 +1,10 @@
 """Environment-backed application settings."""
 
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -16,6 +17,11 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
     cors_origins: list[str] = Field(default_factory=list)
+    provider_mode: Literal["mock", "openai"] = "mock"
+    openai_api_key: SecretStr | None = None
+    openai_model: str = Field(default="gpt-4o-mini", min_length=1, max_length=100)
+    openai_timeout_seconds: float = Field(default=30, gt=0, le=60)
+    api_access_token: SecretStr | None = None
     database_url: str = "postgresql+psycopg://localhost/agentforge"
     test_database_url: str = "postgresql+psycopg://localhost/agentforge_test"
     workflow_max_tasks: int = Field(default=25, ge=1, le=25)
@@ -30,6 +36,18 @@ class Settings(BaseSettings):
         extra="ignore",
         case_sensitive=False,
     )
+
+    @model_validator(mode="after")
+    def validate_provider_settings(self) -> "Settings":
+        if self.provider_mode == "openai" and (
+            self.openai_api_key is None or not self.openai_api_key.get_secret_value().strip()
+        ):
+            raise ValueError("OPENAI_API_KEY is required when PROVIDER_MODE is openai")
+        if self.provider_mode == "openai" and (
+            self.api_access_token is None or not self.api_access_token.get_secret_value().strip()
+        ):
+            raise ValueError("API_ACCESS_TOKEN is required when PROVIDER_MODE is openai")
+        return self
 
     @field_validator("log_level")
     @classmethod

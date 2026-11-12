@@ -165,6 +165,40 @@ and active execution recovery remain outside this slice. The Vite development
 server proxies `/api` to the local API; deployed frontends must route the same
 path.
 
+### Day 15 — OpenAI Planner and Wikipedia search
+
+The roadmap is milestone-based and does not define a calendar Day 15. Following
+the Day 14 graph view, this increment begins M3 with the operator-selected
+OpenAI provider and Wikipedia read-only integration:
+
+- `PROVIDER_MODE=mock` remains the default. `PROVIDER_MODE=openai` replaces
+  only the Planner agent with an OpenAI Chat Completions adapter. The provider
+  endpoint is fixed; no arbitrary base URL or provider-selected tool call is
+  supported. The adapter sends only `AgentInput.task_description`, requests a
+  JSON object, caps the response body and completion size, and validates the
+  result as a non-executable plan with at most 25 steps. It does not send
+  `input_data`, previous results, or metadata. Provider errors are categorized
+  and sanitized; 429/5xx/transient failures are marked retryable but are not
+  automatically retried.
+- When OpenAI mode is enabled, all workflow and execution API routes require a
+  shared bearer token from `API_ACCESS_TOKEN`; health/readiness endpoints stay
+  public. The token is held as a secret setting and compared in constant time.
+  This is a single-operator safeguard, not user identity, per-user
+  authorization, or a substitute for transport security.
+- `wikipedia_search` is an explicitly registered Researcher-capability tool.
+  It accepts a 1–200 character search query, issues a GET only to the fixed
+  English Wikipedia API, and returns at most five excerpts (400 characters
+  each) with bounded article titles and canonical source links. It does not accept a
+  URL, follow agent-selected capabilities, or perform writes. The request has
+  an eight-second network timeout; the existing executor also enforces its
+  configured elapsed-time and output-size limits. As with all workflow inputs,
+  queries and results may be persisted; credentials or sensitive data must not
+  be submitted.
+- Both network integrations are exercised with mocked HTTP responses in tests.
+  Runtime calls require explicit workflow start. The OpenAI key comes from
+  `OPENAI_API_KEY` and is held as a secret setting; it is not included in
+  workflow data, logs, or API responses.
+
 Workflow definitions use the domain Pydantic contracts and validator; tool
 requests are preflighted through the engine's registered-tool and capability
 checks. Invalid definitions return `422`, missing resources return `404`, and
@@ -234,8 +268,8 @@ must treat the outcome as ambiguous rather than retrying automatically.
 
 ## Unresolved questions
 
-1. Which LLM provider(s) are required for Day 2, and what structured-output guarantees do they offer? Default: mock-only in the first vertical slice; provider adapters follow.
-2. Which real tools are required for the first release? Default: mock/read-only examples only until each tool has an owner, schema, risk class, and test.
+1. Which additional LLM providers are required beyond the initial OpenAI Planner adapter?
+2. Which additional read-only tools are required beyond the bounded English Wikipedia search tool?
 3. Which authentication mechanism should enable private-network exposure? Default: bind the first MVP to loopback only until this is resolved.
 4. Which data retention, deletion, and prompt/output redaction rules apply to persisted task content?
 5. Who may approve actions, and how should approval expiry, cancellation, and re-planning behave?

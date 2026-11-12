@@ -16,6 +16,24 @@ The roadmap is milestone-based rather than calendar-based. Each milestone should
 
 **Day 2 exit criteria:** mock end-to-end execution is durable across API restart; unsafe plans are rejected; approval tests prove zero premature invocation; retry/timeout behavior is bounded; focused backend and frontend tests pass without network access or paid credentials.
 
+## Day 15 interpretation — first M3 integration slice
+
+The roadmap defines milestones, not a calendar-day schedule, so it does not
+define a separate Day 15. After Day 14's dependency-graph view, the next
+logical milestone is M3, the first real provider and read-only integration.
+For this implementation, the operator selected:
+
+- OpenAI Chat Completions as an opt-in provider for the Planner role. Mock mode
+  remains the default.
+- A fixed-endpoint, read-only English Wikipedia search tool for Researcher
+  tasks. It accepts a query rather than an arbitrary URL and runs only after
+  explicit workflow start.
+
+This is an initial M3 slice, not the completion of every M3 operational
+requirement. It adds environment-backed credentials and bounded adapter
+contracts, with no arbitrary code, shell execution, writes, or general-purpose
+network access.
+
 ## Milestones
 
 ### M0 — Specification and repository baseline

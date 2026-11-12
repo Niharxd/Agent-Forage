@@ -4,11 +4,12 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from agentforge.api.auth import require_api_access_token
 from agentforge.api.errors import (
     http_exception_handler,
     unhandled_exception_handler,
@@ -52,6 +53,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version="1.0.0",
         lifespan=lifespan,
     )
+    application.state.settings = app_settings
     application.add_middleware(
         RequestSizeLimitMiddleware,
         max_bytes=1_048_576,
@@ -67,8 +69,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.add_exception_handler(RequestValidationError, validation_exception_handler)
     application.add_exception_handler(Exception, unhandled_exception_handler)
     application.include_router(health_router, prefix="/api/v1")
-    application.include_router(workflows_router, prefix="/api/v1")
-    application.include_router(executions_router, prefix="/api/v1")
+    protected_router_dependencies = (
+        [Depends(require_api_access_token)] if app_settings.provider_mode == "openai" else []
+    )
+    application.include_router(
+        workflows_router,
+        prefix="/api/v1",
+        dependencies=protected_router_dependencies,
+    )
+    application.include_router(
+        executions_router,
+        prefix="/api/v1",
+        dependencies=protected_router_dependencies,
+    )
     return application
 
 

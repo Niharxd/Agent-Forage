@@ -16,10 +16,12 @@ from agentforge.tools.safe_tools import (
     DEFAULT_TOOL_REGISTRY,
     JSON_INSPECTION_TOOL,
     TEXT_ANALYSIS_TOOL,
+    WIKIPEDIA_SEARCH_TOOL,
     calculator_handler,
     create_default_registry,
     json_inspection_handler,
     text_analysis_handler,
+    wikipedia_search_handler,
 )
 
 __all__ = [
@@ -27,6 +29,7 @@ __all__ = [
     "DEFAULT_TOOL_REGISTRY",
     "JSON_INSPECTION_TOOL",
     "TEXT_ANALYSIS_TOOL",
+    "WIKIPEDIA_SEARCH_TOOL",
     "ToolDefinition",
     "ToolExecutionError",
     "ToolExecutionFailure",
@@ -41,4 +44,5 @@ __all__ = [
     "create_default_registry",
     "json_inspection_handler",
     "text_analysis_handler",
+    "wikipedia_search_handler",
 ]

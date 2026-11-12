@@ -1,6 +1,6 @@
 """Deterministic mock planner agent."""
 
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -31,8 +31,8 @@ class PlannerResult(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     objective: str = Field(min_length=1, max_length=10_000)
-    proposed_steps: list[ProposedStep] = Field(min_length=1)
-    plan_status: str = "draft_only"
+    proposed_steps: list[ProposedStep] = Field(min_length=1, max_length=25)
+    plan_status: Literal["draft_only"] = "draft_only"
 
 
 class PlannerAgent(Agent):
