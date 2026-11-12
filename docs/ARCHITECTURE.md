@@ -180,6 +180,9 @@ OpenAI provider and Wikipedia read-only integration:
   `input_data`, previous results, or metadata. Provider errors are categorized
   and sanitized; 429/5xx/transient failures are marked retryable but are not
   automatically retried.
+- `WorkflowOrchestrator.prepare()` uses the Planner registered by its
+  `WorkflowEngine`, ensuring draft preparation follows that same provider-mode
+  selection instead of constructing a separate default mock Planner.
 - When OpenAI mode is enabled, all workflow and execution API routes require a
   shared bearer token from `API_ACCESS_TOKEN`; health/readiness endpoints stay
   public. The token is held as a secret setting and compared in constant time.

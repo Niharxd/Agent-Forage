@@ -11,6 +11,7 @@ from agentforge.domain.workflows.models import WorkflowStatus
 from agentforge.providers.contracts import ProviderError
 from agentforge.providers.openai import OpenAIChatCompletionsProvider
 from agentforge.workflow.engine import WorkflowEngine
+from agentforge.workflow.orchestrator import WorkflowOrchestrationError, WorkflowOrchestrator
 from pydantic import SecretStr
 
 API_KEY = "test-key-not-for-logs"
@@ -169,13 +170,13 @@ def test_openai_mode_requires_an_environment_supplied_key() -> None:
 def test_engine_uses_openai_planner_only_after_explicit_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    requests: list[object] = []
+    authorization_headers: list[str | None] = []
     response_body = json.dumps(
         {"choices": [{"message": {"content": json.dumps(VALID_PLAN)}}]}
     ).encode()
 
     def fake_urlopen(request, *, timeout):
-        requests.append(request)
+        authorization_headers.append(request.get_header("Authorization"))
         return BytesIO(response_body)
 
     monkeypatch.setattr("agentforge.providers.openai.urlopen", fake_urlopen)
@@ -192,13 +193,68 @@ def test_engine_uses_openai_planner_only_after_explicit_start(
     )
 
     assert pending.status == WorkflowStatus.PENDING
-    assert requests == []
+    assert authorization_headers == []
 
     completed = engine.run(pending.execution_id)
 
     assert completed.status == WorkflowStatus.COMPLETED
-    assert len(requests) == 1
+    assert authorization_headers == [f"Bearer {API_KEY}"]
     assert API_KEY not in completed.model_dump_json()
+
+
+def test_orchestrator_prepare_uses_engine_configured_openai_planner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authorization_headers: list[str | None] = []
+    response_body = json.dumps(
+        {"choices": [{"message": {"content": json.dumps(VALID_PLAN)}}]}
+    ).encode()
+
+    def fake_urlopen(request, *, timeout):
+        authorization_headers.append(request.get_header("Authorization"))
+        return BytesIO(response_body)
+
+    monkeypatch.setattr("agentforge.providers.openai.urlopen", fake_urlopen)
+    engine = WorkflowEngine(
+        settings=Settings(
+            _env_file=None,
+            provider_mode="openai",
+            openai_api_key=SecretStr(API_KEY),
+            api_access_token=SecretStr(ACCESS_TOKEN),
+        )
+    )
+
+    prepared = WorkflowOrchestrator(engine=engine).prepare("Inspect the supplied task.")
+
+    assert prepared.planner_result.metadata["execution_mode"] == "openai"
+    assert prepared.planner_result.output.metadata["planning_mode"] == "openai"
+    assert prepared.execution.status == WorkflowStatus.PENDING
+    assert authorization_headers == [f"Bearer {API_KEY}"]
+    assert API_KEY not in prepared.model_dump_json()
+
+
+def test_orchestrator_handles_provider_failure_without_leaking_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_with_provider_error(request, *, timeout):
+        raise URLError("private provider response")
+
+    monkeypatch.setattr("agentforge.providers.openai.urlopen", fail_with_provider_error)
+    engine = WorkflowEngine(
+        settings=Settings(
+            _env_file=None,
+            provider_mode="openai",
+            openai_api_key=SecretStr(API_KEY),
+            api_access_token=SecretStr(ACCESS_TOKEN),
+        )
+    )
+
+    with pytest.raises(WorkflowOrchestrationError) as raised:
+        WorkflowOrchestrator(engine=engine).prepare("Inspect the supplied task.")
+
+    assert raised.value.code == "planning_failed"
+    assert "private provider response" not in str(raised.value)
+    assert API_KEY not in str(raised.value)
 
 
 def test_openai_mode_requires_api_bearer_token_for_workflow_routes() -> None:

@@ -5,7 +5,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from agentforge.agents import PlannerAgent
 from agentforge.agents.planner import PlannerResult
 from agentforge.domain.agents.contracts import (
     AgentCapability,
@@ -53,8 +52,8 @@ class WorkflowOrchestrator:
         *,
         planner: Agent | None = None,
     ) -> None:
-        self.engine = engine or WorkflowEngine()
-        self._planner = planner or PlannerAgent()
+        self.engine = engine if engine is not None else WorkflowEngine()
+        self._planner = planner if planner is not None else self.engine.planner
         if self._planner.identity.role != AgentRole.PLANNER:
             raise ValueError("The orchestration planner must implement the planner role.")
 

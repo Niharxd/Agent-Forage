@@ -34,6 +34,14 @@ requirement. It adds environment-backed credentials and bounded adapter
 contracts, with no arbitrary code, shell execution, writes, or general-purpose
 network access.
 
+## Day 16 — Planner integration
+
+`WorkflowOrchestrator.prepare()` now uses the Planner already registered by the
+`WorkflowEngine`, so its mock/OpenAI choice comes from the existing
+`PROVIDER_MODE` setting. Mock mode remains the default. Provider-backed
+preparation and failure handling are tested with mocked HTTP responses; no
+provider retries or new network capabilities are added.
+
 ## Milestones
 
 ### M0 — Specification and repository baseline

@@ -110,6 +110,11 @@ class WorkflowEngine:
         self._active: dict[UUID, WorkflowExecution] = {}
         self._history: OrderedDict[UUID, WorkflowExecutionSnapshot] = OrderedDict()
 
+    @property
+    def planner(self) -> Agent:
+        """Return the Planner registered for this engine's configured provider mode."""
+        return self._agents[AgentRole.PLANNER]
+
     def create_execution(
         self,
         definition: WorkflowDefinitionInput,

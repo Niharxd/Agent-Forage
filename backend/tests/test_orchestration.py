@@ -25,6 +25,7 @@ def test_planner_prepares_validated_pending_work_and_requires_explicit_start() -
         review_criteria=["observations"],
     )
 
+    assert prepared.planner_result.metadata["execution_mode"] == "deterministic_mock"
     assert prepared.planner_result.output.metadata["executable"] is False
     assert prepared.execution.status == WorkflowStatus.PENDING
     assert prepared.execution.execution_order == []
