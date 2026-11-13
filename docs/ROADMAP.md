@@ -42,6 +42,19 @@ network access.
 preparation and failure handling are tested with mocked HTTP responses; no
 provider retries or new network capabilities are added.
 
+## Day 17 — Durable Planner task intake
+
+The workflow API now accepts a bounded natural-language task, plans it through
+the engine-configured Planner, and persists the validated workflow together
+with its pending execution in one database transaction. The response includes
+the workflow definition for operator review and the existing safe execution
+projection. Planning never starts execution; operators still use the existing
+explicit start endpoint. No schema migration or new provider/network behavior
+is introduced. The dashboard remains fixture-driven and is not connected in
+this increment. Planner objectives longer than the existing workflow
+description limit are visibly abbreviated; the original task and task
+instructions retain their full independently bounded content.
+
 ## Milestones
 
 ### M0 — Specification and repository baseline

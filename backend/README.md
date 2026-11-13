@@ -108,6 +108,7 @@ SQLAlchemy models and raw exception messages are not returned.
 
 | Method | Path | Behavior |
 |---|---|---|
+| `POST` | `/workflows/prepare` | Plan a bounded `task_description`, persist the versioned workflow and pending execution in one transaction, and return the draft for review. Does not start work. |
 | `POST` | `/workflows` | Validate and persist a new workflow version. Returns its ID, definition, version, and timestamps. |
 | `GET` | `/workflows?limit=50&offset=0` | List persisted workflow versions. |
 | `GET` | `/workflows/{workflow_id}` | Retrieve one persisted workflow version. |
@@ -122,6 +123,16 @@ Workflow definitions are stored in the existing PostgreSQL `workflows` table.
 Creating another definition with the same name creates its next version under
 the existing unique `(name, version)` constraint. The API does not introduce
 another workflow or execution table.
+
+`POST /workflows/prepare` accepts a non-blank task description of at most
+10,000 characters. It uses the configured Planner (`mock` by default), returns
+the persisted workflow definition and safe pending-execution projection, and
+requires a separate `POST /executions/{execution_id}/start` request before any
+workflow agent or tool runs. In OpenAI mode the existing bearer-token
+requirement applies, and the Planner provider receives only the task
+description. The submitted task remains in the existing execution record;
+long planner objectives are visibly abbreviated to the workflow metadata
+limit, without truncating task instructions.
 
 ### Execution persistence and lifecycle (Day 12)
 

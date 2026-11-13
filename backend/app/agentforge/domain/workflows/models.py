@@ -18,6 +18,7 @@ from agentforge.domain.agents.contracts import (
 from agentforge.tools.contracts import ToolExecutionResult, ToolExecutionStatus
 
 MAX_TASK_INPUT_BYTES = 10_000
+MAX_WORKFLOW_DESCRIPTION_LENGTH = 2_000
 
 
 class WorkflowStateTransitionError(ValueError):
@@ -112,7 +113,7 @@ class WorkflowDefinition(WorkflowContract):
     """A declarative workflow definition; it contains no executable code."""
 
     name: str = Field(default="workflow", min_length=1, max_length=200)
-    description: str | None = Field(default=None, max_length=2_000)
+    description: str | None = Field(default=None, max_length=MAX_WORKFLOW_DESCRIPTION_LENGTH)
     tasks: list[WorkflowTask] = Field(min_length=1)
 
 

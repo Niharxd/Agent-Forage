@@ -1,6 +1,6 @@
 """Coordinate draft planning, validated workflow preparation, and explicit start."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -16,6 +16,7 @@ from agentforge.domain.agents.contracts import (
 )
 from agentforge.domain.agents.interface import Agent
 from agentforge.domain.workflows.models import (
+    MAX_WORKFLOW_DESCRIPTION_LENGTH,
     WorkflowDefinition,
     WorkflowExecution,
     WorkflowExecutionSnapshot,
@@ -43,6 +44,9 @@ class PreparedWorkflow(BaseModel):
     execution: WorkflowExecutionSnapshot
 
 
+PreparedWorkflowCallback = Callable[[WorkflowDefinition, WorkflowExecutionSnapshot], None]
+
+
 class WorkflowOrchestrator:
     """Translate a Planner draft into a validated workflow that awaits explicit start."""
 
@@ -63,6 +67,7 @@ class WorkflowOrchestrator:
         *,
         input_data: JsonObject | None = None,
         review_criteria: Sequence[str] = (),
+        on_prepared: PreparedWorkflowCallback | None = None,
     ) -> PreparedWorkflow:
         """Plan, validate, and register pending work without executing workflow tasks."""
         planner_result = self._planner.execute(
@@ -125,10 +130,17 @@ class WorkflowOrchestrator:
 
         workflow = WorkflowDefinition(
             name="planner-proposed workflow",
-            description=draft.objective,
+            description=_bounded_objective(draft.objective),
             tasks=tasks,
         )
-        execution = self.engine.create_execution(workflow)
+        on_update: ExecutionUpdateCallback | None = None
+        if on_prepared is not None:
+
+            def persist_initial_snapshot(snapshot: WorkflowExecutionSnapshot) -> None:
+                on_prepared(workflow, snapshot)
+
+            on_update = persist_initial_snapshot
+        execution = self.engine.create_execution(workflow, on_update=on_update)
         return PreparedWorkflow(
             planner_result=planner_result,
             workflow=workflow,
@@ -152,3 +164,10 @@ class WorkflowOrchestrator:
     ) -> WorkflowExecutionSnapshot:
         """Delegate cancellation to the workflow engine's lifecycle controls."""
         return self.engine.cancel(execution_id, on_update=on_update)
+
+
+def _bounded_objective(objective: str) -> str:
+    """Keep long planner objectives visibly abbreviated within workflow metadata bounds."""
+    if len(objective) <= MAX_WORKFLOW_DESCRIPTION_LENGTH:
+        return objective
+    return f"{objective[: MAX_WORKFLOW_DESCRIPTION_LENGTH - 3].rstrip()}..."

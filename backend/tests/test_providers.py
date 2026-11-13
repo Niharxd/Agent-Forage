@@ -257,6 +257,79 @@ def test_orchestrator_handles_provider_failure_without_leaking_details(
     assert API_KEY not in str(raised.value)
 
 
+def test_prepare_api_uses_configured_openai_planner_without_exposing_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from agentforge.api.dependencies import get_workflow_engine
+    from agentforge.api.routes import workflows as workflow_routes
+    from agentforge.api.schemas import WorkflowResponse
+    from agentforge.database.dependencies import get_db_session
+    from agentforge.main import create_app
+    from fastapi.testclient import TestClient
+
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        provider_mode="openai",
+        openai_api_key=SecretStr(API_KEY),
+        api_access_token=SecretStr(ACCESS_TOKEN),
+    )
+    application = create_app(settings)
+    engine = WorkflowEngine(settings=settings)
+    response_body = json.dumps(
+        {"choices": [{"message": {"content": json.dumps(VALID_PLAN)}}]}
+    ).encode()
+    requests: list[tuple[str | None, str]] = []
+
+    def fake_urlopen(request, *, timeout):
+        requests.append((request.get_header("Authorization"), request.data.decode("utf-8")))
+        return BytesIO(response_body)
+
+    def override_session():
+        yield None
+
+    def persist_workflow(_session, definition, _snapshot, **_values):
+        now = datetime.now(UTC)
+        return WorkflowResponse(
+            id=uuid4(),
+            name=definition.name,
+            description=definition.description,
+            version=1,
+            workflow_definition=definition,
+            created_at=now,
+            updated_at=now,
+        )
+
+    monkeypatch.setattr("agentforge.providers.openai.urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        workflow_routes,
+        "create_planned_workflow_execution",
+        persist_workflow,
+    )
+    application.dependency_overrides[get_db_session] = override_session
+    application.dependency_overrides[get_workflow_engine] = lambda: engine
+
+    with TestClient(application) as client:
+        response = client.post(
+            "/api/v1/workflows/prepare",
+            json={"task_description": "Inspect the supplied task."},
+            headers={"Authorization": f"Bearer {ACCESS_TOKEN}"},
+        )
+
+    assert response.status_code == 201
+    assert response.json()["execution"]["status"] == "pending"
+    assert len(requests) == 1
+    assert requests[0][0] == f"Bearer {API_KEY}"
+    request_data = json.loads(requests[0][1])
+    assert request_data["messages"][1]["content"] == "Inspect the supplied task."
+    assert API_KEY not in requests[0][1]
+    assert API_KEY not in response.text
+    assert ACCESS_TOKEN not in response.text
+
+
 def test_openai_mode_requires_api_bearer_token_for_workflow_routes() -> None:
     from agentforge.main import create_app
     from fastapi.testclient import TestClient
@@ -275,13 +348,20 @@ def test_openai_mode_requires_api_bearer_token_for_workflow_routes() -> None:
         "description": "Test protected validation.",
         "tasks": [{"task_id": "analyze", "agent_type": "analyst"}],
     }
+    prepare_body = {"task_description": "Prepare a protected task."}
 
     with TestClient(application) as client:
         unauthorized = client.post("/api/v1/workflows/validate", json=request_body)
+        unauthorized_prepare = client.post("/api/v1/workflows/prepare", json=prepare_body)
         unauthorized_execution = client.get("/api/v1/executions")
         invalid_token = client.post(
             "/api/v1/workflows/validate",
             json=request_body,
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+        invalid_prepare_token = client.post(
+            "/api/v1/workflows/prepare",
+            json=prepare_body,
             headers={"Authorization": "Bearer wrong-token"},
         )
         authorized = client.post(
@@ -292,9 +372,17 @@ def test_openai_mode_requires_api_bearer_token_for_workflow_routes() -> None:
         health = client.get("/api/v1/health")
 
     assert unauthorized.status_code == 401
+    assert unauthorized_prepare.status_code == 401
     assert unauthorized_execution.status_code == 401
     assert invalid_token.status_code == 401
+    assert invalid_prepare_token.status_code == 401
     assert authorized.status_code == 200
     assert authorized.json()["valid"] is True
     assert health.status_code == 200
-    assert ACCESS_TOKEN not in unauthorized.text + invalid_token.text + authorized.text
+    assert ACCESS_TOKEN not in (
+        unauthorized.text
+        + unauthorized_prepare.text
+        + invalid_token.text
+        + invalid_prepare_token.text
+        + authorized.text
+    )

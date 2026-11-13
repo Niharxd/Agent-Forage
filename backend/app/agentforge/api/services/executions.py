@@ -67,6 +67,7 @@ class ExecutionRepository:
         workflow_id: UUID,
         workflow_version: int,
         definition: WorkflowDefinition,
+        original_task: str | None = None,
     ) -> None:
         """Atomically insert an execution, its initial steps, and its creation event."""
         try:
@@ -81,7 +82,11 @@ class ExecutionRepository:
             record = WorkflowExecution(
                 id=snapshot.execution_id,
                 workflow_id=workflow_id,
-                original_task=definition.description or definition.name,
+                original_task=(
+                    original_task
+                    if original_task is not None
+                    else definition.description or definition.name
+                ),
                 status=snapshot.status.value,
                 plan_version=workflow_version,
                 started_at=snapshot.started_at,

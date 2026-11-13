@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agentforge.domain.agents import AgentRole
 from agentforge.domain.workflows.models import (
@@ -20,6 +20,22 @@ class WorkflowCreateRequest(WorkflowDefinition):
     """A named workflow definition submitted for validation and persistence."""
 
     name: str = Field(min_length=1, max_length=200)
+
+
+class WorkflowPrepareRequest(BaseModel):
+    """A bounded natural-language task to plan into a pending workflow."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_description: str = Field(min_length=1, max_length=10_000)
+
+    @field_validator("task_description")
+    @classmethod
+    def task_description_must_not_be_blank(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("task_description must not be blank")
+        return normalized
 
 
 class WorkflowResponse(BaseModel):
@@ -95,6 +111,13 @@ class ExecutionListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class WorkflowPrepareResponse(BaseModel):
+    """Persisted workflow draft and its pending execution for operator review."""
+
+    workflow: WorkflowResponse
+    execution: ExecutionResponse
 
 
 PageLimit = Annotated[int, Field(ge=1, le=100)]

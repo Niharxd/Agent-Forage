@@ -7,8 +7,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from agentforge.api.schemas import WorkflowCreateRequest, WorkflowResponse
+from agentforge.api.services.executions import ExecutionRepository
 from agentforge.domain.models import Workflow
-from agentforge.domain.workflows.models import WorkflowDefinition
+from agentforge.domain.workflows.models import WorkflowDefinition, WorkflowExecutionSnapshot
 
 
 class WorkflowVersionConflict(Exception):
@@ -20,15 +21,7 @@ def create_workflow(
     definition: WorkflowDefinition,
 ) -> WorkflowResponse:
     """Persist one validated definition as the next version of its name."""
-    latest_version = session.scalar(
-        select(func.max(Workflow.version)).where(Workflow.name == definition.name)
-    )
-    record = Workflow(
-        name=definition.name,
-        description=definition.description,
-        version=(latest_version or 0) + 1,
-        workflow_definition=definition.model_dump(mode="json"),
-    )
+    record = _new_workflow_record(session, definition)
     session.add(record)
     try:
         session.commit()
@@ -37,6 +30,50 @@ def create_workflow(
         session.rollback()
         raise WorkflowVersionConflict from exc
     return workflow_response(record)
+
+
+def create_planned_workflow_execution(
+    session: Session,
+    definition: WorkflowDefinition,
+    snapshot: WorkflowExecutionSnapshot,
+    *,
+    original_task: str,
+) -> WorkflowResponse:
+    """Persist a planner-created workflow and its initial execution atomically."""
+    record = _new_workflow_record(session, definition)
+    session.add(record)
+    try:
+        session.flush()
+    except IntegrityError as exc:
+        session.rollback()
+        raise WorkflowVersionConflict from exc
+
+    try:
+        saved_workflow = workflow_response(record)
+    except Exception:
+        session.rollback()
+        raise
+
+    ExecutionRepository(session).create_execution(
+        snapshot,
+        workflow_id=record.id,
+        workflow_version=record.version,
+        definition=definition,
+        original_task=original_task,
+    )
+    return saved_workflow
+
+
+def _new_workflow_record(session: Session, definition: WorkflowDefinition) -> Workflow:
+    latest_version = session.scalar(
+        select(func.max(Workflow.version)).where(Workflow.name == definition.name)
+    )
+    return Workflow(
+        name=definition.name,
+        description=definition.description,
+        version=(latest_version or 0) + 1,
+        workflow_definition=definition.model_dump(mode="json"),
+    )
 
 
 def get_workflow(session: Session, workflow_id: UUID) -> WorkflowResponse | None:

@@ -1,7 +1,7 @@
 import os
 from collections.abc import Iterator
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from agentforge.api.services.executions import (
@@ -9,6 +9,7 @@ from agentforge.api.services.executions import (
     ExecutionPersistenceError,
     ExecutionRepository,
 )
+from agentforge.api.services.workflows import create_planned_workflow_execution
 from agentforge.config.settings import Settings
 from agentforge.database.dependencies import get_db_session
 from agentforge.database.engine import create_database_engine
@@ -31,6 +32,7 @@ from agentforge.domain.workflows.models import (
 )
 from agentforge.main import create_app
 from agentforge.workflow import ExecutionNotFoundError, WorkflowEngine
+from agentforge.workflow.orchestrator import WorkflowOrchestrator
 from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
@@ -44,6 +46,7 @@ from sqlalchemy.orm import Session
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 TEST_DATABASE_NAME = "agentforge_test"
+TEST_DATABASE_URL = "postgresql+psycopg://agentforge@localhost/agentforge_test"
 
 
 def _alembic_config(connection: object | None = None) -> Config:
@@ -178,6 +181,177 @@ def test_model_relationships_persist_and_timestamp_fields_are_populated(
     assert workflow.updated_at is not None
     assert execution.created_at is not None
     assert db_session.scalar(select(Workflow).where(Workflow.id == workflow.id)) is workflow
+
+
+def test_planner_created_workflow_and_pending_execution_persist_together(
+    db_session: Session,
+) -> None:
+    workflow_name = f"planner-proposed-{uuid4().hex}"
+    definition = WorkflowDefinition.model_validate(
+        {
+            "name": workflow_name,
+            "description": "Inspect the supplied task.",
+            "tasks": [
+                {
+                    "task_id": "draft-1",
+                    "agent_type": "analyst",
+                    "description": "Inspect supplied information.",
+                }
+            ],
+        }
+    )
+    pending = WorkflowEngine().create_execution(definition)
+
+    original_task = "x" * 10_000
+    saved_workflow = create_planned_workflow_execution(
+        db_session,
+        definition,
+        pending,
+        original_task=original_task,
+    )
+    saved_execution, saved_definition = ExecutionRepository(db_session).get_execution_details(
+        pending.execution_id
+    )
+
+    assert saved_workflow.version == 1
+    assert saved_execution.status == WorkflowStatus.PENDING
+    assert saved_execution.execution_order == []
+    assert saved_definition == definition
+    saved_execution_record = db_session.get(WorkflowExecution, pending.execution_id)
+    assert saved_execution_record is not None
+    assert saved_execution_record.original_task == original_task
+
+    with pytest.raises(ExecutionAlreadyExistsError):
+        create_planned_workflow_execution(
+            db_session,
+            definition,
+            pending,
+            original_task=original_task,
+        )
+    assert (
+        db_session.scalar(
+            select(func.count()).select_from(Workflow).where(Workflow.name == workflow_name)
+        )
+        == 1
+    )
+
+
+def test_planned_workflow_commit_failure_rolls_back_before_engine_registration(
+    migrated_database: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_description = f"Commit-failure regression {uuid4().hex}"
+    engine = WorkflowEngine()
+    orchestrator = WorkflowOrchestrator(engine=engine)
+    execution_ids = []
+
+    with Session(migrated_database) as session:
+        workflow_count_before = session.scalar(
+            select(func.count())
+            .select_from(Workflow)
+            .where(Workflow.name == "planner-proposed workflow")
+        )
+
+        def fail_commit() -> None:
+            raise RuntimeError("controlled commit failure")
+
+        monkeypatch.setattr(session, "commit", fail_commit)
+
+        def persist_prepared(definition, snapshot) -> None:
+            execution_ids.append(snapshot.execution_id)
+            create_planned_workflow_execution(
+                session,
+                definition,
+                snapshot,
+                original_task=task_description,
+            )
+
+        with pytest.raises(ExecutionPersistenceError):
+            orchestrator.prepare(task_description, on_prepared=persist_prepared)
+
+    assert len(execution_ids) == 1
+    with pytest.raises(ExecutionNotFoundError):
+        engine.get_execution(execution_ids[0])
+
+    with Session(migrated_database) as session:
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(Workflow)
+                .where(Workflow.name == "planner-proposed workflow")
+            )
+            == workflow_count_before
+        )
+        assert session.get(WorkflowExecution, execution_ids[0]) is None
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(ExecutionStep)
+                .where(ExecutionStep.execution_id == execution_ids[0])
+            )
+            == 0
+        )
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(ExecutionEvent)
+                .where(ExecutionEvent.execution_id == execution_ids[0])
+            )
+            == 0
+        )
+
+
+def test_prepare_route_survives_postcommit_refresh_failure_and_registers_execution(
+    migrated_database: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        test_database_url=TEST_DATABASE_URL,
+    )
+    application = create_app(settings)
+    original_commit = Session.commit
+    original_refresh = Session.refresh
+
+    def track_commit(session: Session) -> None:
+        original_commit(session)
+        session.info["committed_for_test"] = True
+
+    def fail_postcommit_refresh(session: Session, instance: object, *args, **kwargs) -> None:
+        if session.info.get("committed_for_test"):
+            raise RuntimeError("simulated post-commit refresh failure")
+        original_refresh(session, instance, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "commit", track_commit)
+    monkeypatch.setattr(Session, "refresh", fail_postcommit_refresh)
+
+    task_description = f"Integration route regression {uuid4().hex}"
+    with TestClient(application, raise_server_exceptions=False) as client:
+        prepared_response = client.post(
+            "/api/v1/workflows/prepare",
+            json={"task_description": task_description},
+        )
+
+        assert prepared_response.status_code == 201
+        prepared = prepared_response.json()
+        execution_id = UUID(prepared["execution"]["execution_id"])
+        assert prepared["execution"]["status"] == WorkflowStatus.PENDING.value
+        assert prepared["execution"]["execution_order"] == []
+
+        pending_response = client.get(f"/api/v1/executions/{execution_id}")
+        assert pending_response.status_code == 200
+        assert pending_response.json()["status"] == WorkflowStatus.PENDING.value
+
+        started_response = client.post(f"/api/v1/executions/{execution_id}/start")
+        assert started_response.status_code == 200
+        assert started_response.json()["status"] == WorkflowStatus.COMPLETED.value
+        assert started_response.json()["execution_order"]
+
+    with Session(migrated_database) as session:
+        execution_record = session.get(WorkflowExecution, execution_id)
+        assert execution_record is not None
+        assert execution_record.original_task == task_description
 
 
 def test_user_email_and_workflow_version_are_unique(db_session: Session) -> None:

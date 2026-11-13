@@ -19,6 +19,7 @@ _HTTP_ERROR_CODES = {
     409: ("conflict", "The request conflicts with the current resource state."),
     413: ("request_too_large", "The request body exceeds the allowed size."),
     422: ("validation_error", "Request validation failed."),
+    502: ("planning_failed", "The Planner could not prepare a workflow."),
 }
 
 

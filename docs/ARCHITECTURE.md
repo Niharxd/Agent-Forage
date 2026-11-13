@@ -202,6 +202,24 @@ OpenAI provider and Wikipedia read-only integration:
   `OPENAI_API_KEY` and is held as a secret setting; it is not included in
   workflow data, logs, or API responses.
 
+### Day 17 — durable Planner task intake
+
+`POST /api/v1/workflows/prepare` accepts a non-blank task description capped at
+10,000 characters and calls the Planner registered by the request's
+`WorkflowEngine`. Planning errors return a sanitized gateway error. A valid
+draft is validated by the normal engine path, then its versioned workflow
+record, pending execution, initial task rows, and creation event are committed
+in one transaction using the existing tables. The response returns the
+persisted workflow definition for review and the safe execution projection.
+The execution remains pending and can be started only through the existing
+explicit start endpoint. In OpenAI mode the existing workflow-router bearer
+authentication still applies, and the provider continues to receive only the
+bounded task description. The original task is stored in the existing
+execution `original_task` field, while planner objectives longer than the
+existing workflow-description limit are visibly abbreviated in metadata. Task
+instructions remain fully bounded and unmodified. No schema change or
+automatic retries are involved.
+
 Workflow definitions use the domain Pydantic contracts and validator; tool
 requests are preflighted through the engine's registered-tool and capability
 checks. Invalid definitions return `422`, missing resources return `404`, and

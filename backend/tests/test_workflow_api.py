@@ -95,6 +95,16 @@ def api(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, WorkflowEngine, Fa
         stored_workflows[record.id] = record
         return record
 
+    def create_stored_planned_execution(_, definition, snapshot, **_values) -> WorkflowResponse:
+        record = create_stored_workflow(None, definition)
+        FakeExecutionRepository(None).create_execution(
+            snapshot,
+            workflow_id=record.id,
+            workflow_version=record.version,
+            definition=definition,
+        )
+        return record
+
     def get_stored_workflow(_, workflow_id: UUID) -> WorkflowResponse | None:
         return stored_workflows.get(workflow_id)
 
@@ -109,6 +119,11 @@ def api(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, WorkflowEngine, Fa
         yield None
 
     monkeypatch.setattr(workflow_routes, "create_workflow", create_stored_workflow)
+    monkeypatch.setattr(
+        workflow_routes,
+        "create_planned_workflow_execution",
+        create_stored_planned_execution,
+    )
     monkeypatch.setattr(workflow_routes, "get_workflow", get_stored_workflow)
     monkeypatch.setattr(workflow_routes, "list_workflows", list_stored_workflows)
     monkeypatch.setattr(execution_routes, "get_workflow", get_stored_workflow)
@@ -164,6 +179,87 @@ def test_workflow_create_version_list_retrieve_and_validate(api) -> None:
         workflow["id"],
         second_version.json()["id"],
     }
+
+
+def test_planner_prepare_persists_reviewable_pending_work_before_explicit_start(api) -> None:
+    client, _, _ = api
+    response = client.post(
+        "/api/v1/workflows/prepare",
+        json={"task_description": "Inspect the supplied labels."},
+    )
+
+    assert response.status_code == 201
+    prepared = response.json()
+    assert prepared["workflow"]["workflow_definition"]["tasks"][0]["description"] == (
+        "Inspect the supplied labels."
+    )
+    assert prepared["execution"]["status"] == "pending"
+    assert prepared["execution"]["execution_order"] == []
+    assert prepared["execution"]["workflow_plan"][0]["status"] == "pending"
+
+    execution_id = prepared["execution"]["execution_id"]
+    retrieved = client.get(f"/api/v1/executions/{execution_id}")
+    assert retrieved.status_code == 200
+    assert retrieved.json()["status"] == "pending"
+
+    started = client.post(f"/api/v1/executions/{execution_id}/start")
+    assert started.status_code == 200
+    assert started.json()["status"] == "completed"
+    assert started.json()["execution_order"] == ["draft-1"]
+
+
+@pytest.mark.parametrize("task_description", ["", "   ", "x" * 10_001])
+def test_planner_prepare_rejects_empty_or_oversized_tasks(api, task_description: str) -> None:
+    client, _, _ = api
+
+    response = client.post(
+        "/api/v1/workflows/prepare",
+        json={"task_description": task_description},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+
+
+def test_planner_prepare_accepts_maximum_task_length(api) -> None:
+    client, _, _ = api
+
+    response = client.post(
+        "/api/v1/workflows/prepare",
+        json={"task_description": "x" * 10_000},
+    )
+
+    assert response.status_code == 201
+    description = response.json()["workflow"]["workflow_definition"]["description"]
+    assert len(description) == 2_000
+    assert description.endswith("...")
+    assert len(response.json()["workflow"]["workflow_definition"]["tasks"][0]["description"]) == (
+        10_000
+    )
+
+
+def test_planner_prepare_failure_is_safe_and_does_not_create_workflow(
+    api,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentforge.api.routes import workflows as workflow_routes
+    from agentforge.workflow.orchestrator import WorkflowOrchestrationError
+
+    client, _, _ = api
+
+    def fail_prepare(*_args, **_kwargs):
+        raise WorkflowOrchestrationError("planning_failed", "private provider detail")
+
+    monkeypatch.setattr(workflow_routes.WorkflowOrchestrator, "prepare", fail_prepare)
+    response = client.post(
+        "/api/v1/workflows/prepare",
+        json={"task_description": "Prepare a task."},
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "planning_failed"
+    assert "private provider detail" not in response.text
+    assert client.get("/api/v1/workflows").json()["total"] == 0
 
 
 def test_invalid_workflow_validation_and_creation_are_safe(api) -> None:

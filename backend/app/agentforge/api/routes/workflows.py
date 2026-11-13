@@ -6,25 +6,31 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from agentforge.api.dependencies import get_workflow_engine
+from agentforge.api.dependencies import get_workflow_engine, get_workflow_orchestrator
+from agentforge.api.responses import execution_response
 from agentforge.api.schemas import (
     PageLimit,
     WorkflowCreateRequest,
     WorkflowListResponse,
+    WorkflowPrepareRequest,
+    WorkflowPrepareResponse,
     WorkflowResponse,
     WorkflowValidationIssueResponse,
     WorkflowValidationResponse,
 )
 from agentforge.api.services.workflows import (
     WorkflowVersionConflict,
+    create_planned_workflow_execution,
     create_workflow,
     get_workflow,
     list_workflows,
     validate_request_schema,
 )
 from agentforge.database.dependencies import get_db_session
+from agentforge.domain.workflows.models import WorkflowDefinition, WorkflowExecutionSnapshot
 from agentforge.domain.workflows.validation import WorkflowValidationError
 from agentforge.workflow.engine import WorkflowEngine
+from agentforge.workflow.orchestrator import WorkflowOrchestrationError, WorkflowOrchestrator
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
 
@@ -68,6 +74,61 @@ def validate_workflow(
     except WorkflowValidationError as exc:
         return WorkflowValidationResponse(valid=False, issues=_validation_issues(exc))
     return WorkflowValidationResponse(valid=True, workflow=validated)
+
+
+@router.post(
+    "/prepare",
+    response_model=WorkflowPrepareResponse,
+    status_code=201,
+)
+def prepare_workflow(
+    body: WorkflowPrepareRequest,
+    session: Annotated[Session, Depends(get_db_session)],
+    orchestrator: Annotated[WorkflowOrchestrator, Depends(get_workflow_orchestrator)],
+) -> WorkflowPrepareResponse:
+    """Plan a task, persist its validated workflow, and leave it pending for review."""
+    persisted_workflow: WorkflowResponse | None = None
+
+    def persist_prepared(
+        definition: WorkflowDefinition,
+        snapshot: WorkflowExecutionSnapshot,
+    ) -> None:
+        nonlocal persisted_workflow
+        persisted_workflow = create_planned_workflow_execution(
+            session,
+            definition,
+            snapshot,
+            original_task=body.task_description,
+        )
+
+    try:
+        prepared = orchestrator.prepare(
+            body.task_description,
+            on_prepared=persist_prepared,
+        )
+    except (WorkflowOrchestrationError, WorkflowValidationError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="The Planner could not prepare a valid workflow.",
+        ) from exc
+    except WorkflowVersionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": {
+                    "code": "workflow_version_conflict",
+                    "message": "A workflow version could not be created.",
+                    "details": [],
+                }
+            },
+        ) from exc
+
+    if persisted_workflow is None:
+        raise RuntimeError("The prepared workflow was not persisted.")
+    return WorkflowPrepareResponse(
+        workflow=persisted_workflow,
+        execution=execution_response(prepared.execution, prepared.workflow),
+    )
 
 
 @router.post("", response_model=WorkflowResponse, status_code=201)
