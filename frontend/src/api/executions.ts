@@ -63,14 +63,41 @@ export type ExecutionListFilters = {
 
 const apiBaseUrl = "/api/v1";
 
-async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
+export type WorkflowRecord = {
+  id: string;
+  name: string;
+  description: string | null;
+  version: number;
+  workflow_definition: { tasks: Array<{ task_id: string }> };
+  created_at: string;
+  updated_at: string;
+};
+
+export type Approval = {
+  approval_id: string;
+  execution_id: string;
+  task_id: string | null;
+  action_description: string;
+  status: string;
+  requested_at: string;
+  reviewed_at: string | null;
+};
+
+export type PrepareResponse = { workflow: WorkflowRecord; execution: Execution };
+
+async function request<T>(path: string, signal?: AbortSignal, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
-    headers: { Accept: "application/json" },
+    headers: { Accept: "application/json", ...(init?.body ? { "Content-Type": "application/json" } : {}), ...init?.headers },
     signal,
+    ...init,
   });
 
   if (!response.ok) {
-    throw new Error(`Request failed (${response.status}).`);
+    if (response.status === 401) throw new Error("Operator authentication is required for this action.");
+    if (response.status === 503) throw new Error("The API is temporarily unavailable or operator authentication is not configured.");
+    let detail = "";
+    try { const body = await response.json() as { detail?: unknown }; detail = typeof body.detail === "string" ? body.detail : ""; } catch { /* response may not contain JSON */ }
+    throw new Error(detail || `Request failed (${response.status}).`);
   }
 
   try {
@@ -81,6 +108,26 @@ async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
     }
     throw error;
   }
+}
+
+export function createPlannedWorkflow(taskDescription: string, signal?: AbortSignal): Promise<PrepareResponse> {
+  return request("/workflows/prepare", signal, { method: "POST", body: JSON.stringify({ task_description: taskDescription }) });
+}
+
+export function listWorkflows(signal?: AbortSignal): Promise<{ items: WorkflowRecord[]; total: number; limit: number; offset: number }> {
+  return request("/workflows?limit=50&offset=0", signal);
+}
+
+export function listApprovals(executionId: string, signal?: AbortSignal): Promise<Approval[]> {
+  return request(`/executions/${encodeURIComponent(executionId)}/approvals`, signal);
+}
+
+export function startExecution(executionId: string): Promise<Execution> {
+  return request(`/executions/${encodeURIComponent(executionId)}/start`, undefined, { method: "POST" });
+}
+
+export function cancelExecution(executionId: string): Promise<Execution> {
+  return request(`/executions/${encodeURIComponent(executionId)}/cancel`, undefined, { method: "POST" });
 }
 
 export function listExecutions(

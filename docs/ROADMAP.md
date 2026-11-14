@@ -55,6 +55,16 @@ this increment. Planner objectives longer than the existing workflow
 description limit are visibly abbreviated; the original task and task
 instructions retain their full independently bounded content.
 
+## Day 19 interpretation — operator frontend integration
+
+The roadmap has no separately defined Day 19 task. Following the durable
+workflow intake and persistence work in Day 17 and the completed Day 18 API
+milestone, the next logical frontend milestone is to replace fixture-driven
+operator views with the persisted workflow and execution APIs, establish a
+cohesive AgentForge interface, and expose safe execution and approval status.
+The frontend continues to require explicit operator start actions; it does not
+change backend authorization or execution policy.
+
 ## Milestones
 
 ### M0 — Specification and repository baseline

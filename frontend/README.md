@@ -38,15 +38,27 @@ npm run typecheck
 npm run test
 ```
 
-## Environment variables
+## API integration and operator authentication
 
-The frontend uses a centralized API configuration pattern and supports a base URL environment variable:
+The frontend calls the same-origin `/api/v1` routes. Vite proxies `/api` to
+`http://127.0.0.1:8000` during local development. The UI uses persisted
+workflow and execution APIs for workflow preparation, workflow listing,
+execution history, details, start, cancellation, and approval visibility.
 
-```bash
-VITE_API_BASE_URL=http://localhost:8000
-```
+The backend protects approval listing and review with its shared operator
+bearer token. There is no secure browser session or server-side token proxy in
+the current architecture, so the frontend does not embed or store that token.
+Approval review remains unavailable from the browser until a server-side
+authentication boundary is provided; protected approval reads show the API's
+safe error. Do not add the token to `VITE_*` variables because those values are
+bundled into browser code.
 
-The app does not implement live workflow execution yet, so all workflow and execution screens use development demo data until backend integration is connected.
+The official `AgentForge Gradient Circuit Logo.png` is stored at
+`public/assets/agentforge-logo.png` and used in the sidebar with contained
+proportions. Its supplied transparency and gradient are preserved.
+
+Submitted task descriptions are persisted by the backend. Do not submit
+credentials or content that must not be retained.
 
 ## Theme implementation
 

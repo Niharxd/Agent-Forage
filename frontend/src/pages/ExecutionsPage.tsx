@@ -1,6 +1,6 @@
-import { RefreshCw, Search } from "lucide-react";
+import { AlertTriangle, CheckCircle2, RefreshCw, Search } from "lucide-react";
 import { useEffect, useState } from "react";
-import { getExecution, listExecutions, type Execution, type ExecutionStatus } from "../api/executions";
+import { cancelExecution, getExecution, listApprovals, listExecutions, startExecution, type Approval, type Execution, type ExecutionStatus } from "../api/executions";
 import { Button } from "../components/Button";
 import { EmptyState } from "../components/EmptyState";
 import { LoadingState } from "../components/LoadingState";
@@ -65,7 +65,23 @@ function formatTimestamp(value: string | null): string {
   return Number.isNaN(date.valueOf()) ? "Unavailable" : date.toLocaleString();
 }
 
-function ExecutionDetails({ execution }: { execution: Execution }) {
+function ExecutionDetails({ execution, onChanged }: { execution: Execution; onChanged: () => void }) {
+  const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [acting, setActing] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    listApprovals(execution.execution_id, controller.signal).then((items) => { if (!controller.signal.aborted) { if (Array.isArray(items)) setApprovals(items); else setApprovalError("The server returned an invalid approval response."); } }).catch((error: unknown) => { if (!controller.signal.aborted) setApprovalError(error instanceof Error ? error.message : "Approval status is unavailable."); });
+    return () => controller.abort();
+  }, [execution.execution_id]);
+  async function runAction(action: "start" | "cancel") {
+    if (acting) return;
+    setActing(true); setActionError(null);
+    try { if (action === "start") await startExecution(execution.execution_id); else await cancelExecution(execution.execution_id); onChanged(); }
+    catch (error) { setActionError(error instanceof Error ? error.message : "Execution action failed."); }
+    finally { setActing(false); }
+  }
   const taskIds = [
     ...execution.execution_order,
     ...Object.keys(execution.task_results).filter((taskId) => !execution.execution_order.includes(taskId)),
@@ -82,6 +98,19 @@ function ExecutionDetails({ execution }: { execution: Execution }) {
           <p className="mt-1 break-all text-xs text-[var(--muted)]">{execution.execution_id}</p>
         </div>
         <StatusBadge tone={statusTone(execution.status)}>{statusLabels[execution.status]}</StatusBadge>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        {execution.status === "pending" && <Button onClick={() => void runAction("start")} disabled={acting}>{acting ? "Starting…" : "Start execution"}</Button>}
+        {(execution.status === "pending" || execution.status === "running") && <Button variant="secondary" onClick={() => void runAction("cancel")} disabled={acting}>{acting ? "Updating…" : "Cancel execution"}</Button>}
+        {actionError && <span role="alert" className="text-xs text-[var(--error)]">{actionError}</span>}
+      </div>
+
+      <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-alt)] p-4">
+        <div className="mb-3 flex items-center gap-2"><AlertTriangle size={15} className="text-amber-300"/><h3 className="text-sm font-semibold">Approvals</h3><span className="ml-auto rounded-full border border-[var(--border)] px-2 py-0.5 text-[10px] text-[var(--muted)]">{approvals.filter((item) => item.status === "pending").length} pending</span></div>
+        {approvals.map((approval) => <div key={approval.approval_id} className="border-t border-[var(--border)] py-3 first:border-0"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm text-[var(--text)]">{approval.action_description}</p><StatusBadge tone={approval.status === "pending" ? "blue" : approval.status === "approved" ? "green" : "neutral"}>{approval.status}</StatusBadge></div><p className="mt-1 text-xs text-[var(--secondary)]">Task {approval.task_id ?? "unassigned"} · Requested {formatTimestamp(approval.requested_at)}{approval.reviewed_at ? ` · Reviewed ${formatTimestamp(approval.reviewed_at)}` : ""}</p></div>)}
+        {!approvals.length && !approvalError && <p className="text-xs text-[var(--muted)]"><CheckCircle2 className="mr-1 inline" size={13}/>No approval requests for this execution.</p>}
+        {approvalError && <p role="status" className="text-xs text-[var(--muted)]">Approval list unavailable: {approvalError} Approval review requires the configured operator bearer token.</p>}
       </div>
 
       {execution.workflow_plan ? (
@@ -392,7 +421,7 @@ export default function ExecutionsPage() {
             </Button>
           </div>
         ) : selectedExecution ? (
-          <ExecutionDetails execution={selectedExecution} />
+          <ExecutionDetails execution={selectedExecution} onChanged={() => { setDetailReload((value) => value + 1); setReloadList((value) => value + 1); }} />
         ) : null
       ) : null}
 

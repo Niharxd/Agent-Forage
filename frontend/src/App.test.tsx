@@ -1,19 +1,21 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 
 describe("AgentForge application shell", () => {
   beforeEach(() => {
     window.localStorage.clear();
     document.documentElement.dataset.theme = "light";
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("API unavailable")));
   });
 
-  it("renders the dashboard and application navigation", () => {
+  it("renders the dashboard and application navigation", async () => {
     render(<App />);
 
     expect(screen.getByRole("navigation", { name: /primary navigation/i })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /welcome back, nihar/i })).toBeInTheDocument();
-    expect(screen.getByText(/total workflows/i)).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "AgentForge" })).toHaveAttribute("src", "/assets/agentforge-logo.png");
+    expect(await screen.findByRole("heading", { name: /command center/i })).toBeInTheDocument();
+    expect(screen.getByText(/recent executions/i)).toBeInTheDocument();
   });
 
   it("switches to the workflows route from the sidebar", () => {
@@ -21,7 +23,8 @@ describe("AgentForge application shell", () => {
 
     fireEvent.click(screen.getAllByRole("link", { name: /workflows/i })[0]);
 
-    expect(screen.getByText(/development fixtures are used until real orchestration data is connected/i)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /prepare a workflow/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /workflow registry/i })).toBeInTheDocument();
   });
 
   it("switches theme and persists the selection", () => {
@@ -33,12 +36,10 @@ describe("AgentForge application shell", () => {
     expect(window.localStorage.getItem("agentforge-theme")).toBe("dark");
   });
 
-  it("renders the empty dashboard state for demo content", () => {
+  it("shows a clear dashboard retry state when the API is unavailable", async () => {
     render(<App />);
-
-    fireEvent.click(screen.getByRole("button", { name: /empty demo state/i }));
-
-    expect(screen.getByText(/no workflows to display/i)).toBeInTheDocument();
+    expect((await screen.findAllByRole("alert"))[0]).toHaveTextContent(/api unavailable/i);
+    expect(screen.getAllByRole("button", { name: /retry/i }).length).toBeGreaterThan(0);
   });
 
   it("renders the settings page with theme controls", () => {

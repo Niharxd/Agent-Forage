@@ -1,63 +1,18 @@
-import { Bell, ChevronRight, Menu, Search, Settings } from "lucide-react";
+import { ChevronRight, Menu } from "lucide-react";
 import { useLocation } from "react-router-dom";
 import { navigationItems } from "../data/demoData";
-import { Button } from "./Button";
 import { ThemeToggle } from "./ThemeToggle";
 
-type HeaderProps = {
-  onMenuClick: () => void;
-};
+type HeaderProps = { onMenuClick: () => void };
 
 export function Header({ onMenuClick }: HeaderProps) {
   const location = useLocation();
-  const currentItem = navigationItems.find((item) => item.to === location.pathname) ?? navigationItems[0];
-
-  return (
-    <header className="border-b border-[var(--border)] bg-[color:var(--surface)]/90 backdrop-blur-sm">
-      <div className="flex items-center gap-3 px-4 py-3 md:px-6">
-        <button
-          type="button"
-          className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--surface)] text-[var(--text)] md:hidden"
-          aria-label="Open navigation"
-          onClick={onMenuClick}
-        >
-          <Menu className="h-4 w-4" />
-        </button>
-
-        <div className="hidden min-w-0 items-center gap-2 text-sm text-[var(--muted)] md:flex">
-          <span>Overview</span>
-          <ChevronRight className="h-3.5 w-3.5" />
-          <span className="truncate text-[var(--text)]">{currentItem.label}</span>
-        </div>
-
-        <div className="hidden flex-1 items-center justify-center md:flex">
-          <div className="relative w-full max-w-md">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--muted)]" />
-            <input
-              aria-label="Search across the interface"
-              placeholder="Search workflows, agents..."
-              className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface-alt)] py-2.5 pl-9 pr-3 text-sm text-[var(--text)] placeholder:text-[var(--muted)] focus:border-[var(--primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent-soft)]"
-            />
-          </div>
-        </div>
-
-        <div className="ml-auto flex items-center gap-2">
-          <Button variant="ghost" size="sm" className="hidden md:inline-flex" aria-label="Notifications">
-            <Bell className="h-4 w-4" />
-          </Button>
-          <Button variant="ghost" size="sm" className="hidden md:inline-flex" aria-label="Settings shortcut">
-            <Settings className="h-4 w-4" />
-          </Button>
-          <ThemeToggle />
-          <div className="flex items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-2 py-1.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--accent-soft)] text-xs font-semibold text-[var(--accent)]">N</div>
-            <div className="hidden text-xs text-[var(--secondary)] md:block">
-              <div className="font-medium text-[var(--text)]">Nihar</div>
-              <div>Ops</div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </header>
-  );
+  const current = navigationItems.find((item) => item.to === location.pathname) ?? navigationItems[0];
+  return <header className="sticky top-0 z-20 border-b border-[var(--border)] bg-[var(--bg)]/90 backdrop-blur-xl">
+    <div className="flex h-[62px] items-center gap-3 px-4 md:px-8">
+      <button type="button" onClick={onMenuClick} aria-label="Open navigation" className="grid h-9 w-9 place-items-center rounded-lg border border-[var(--border)] text-[var(--secondary)] md:hidden"><Menu size={18}/></button>
+      <div className="flex items-center gap-2 text-sm"><span className="hidden text-[var(--muted)] sm:inline">AgentForge</span><ChevronRight size={14} className="hidden text-[var(--muted)] sm:block"/><span className="font-medium">{current.label}</span></div>
+      <div className="ml-auto flex items-center gap-3"><span className="hidden items-center gap-2 text-[11px] text-[var(--muted)] sm:flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400"/>Operator console</span><div className="h-5 w-px bg-[var(--border)]"/><ThemeToggle/></div>
+    </div>
+  </header>;
 }
