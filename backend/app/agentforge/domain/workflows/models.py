@@ -36,6 +36,7 @@ class WorkflowStatus(StrEnum):
 
     PENDING = "pending"
     RUNNING = "running"
+    WAITING_APPROVAL = "waiting_approval"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -46,6 +47,7 @@ class TaskStatus(StrEnum):
 
     PENDING = "pending"
     RUNNING = "running"
+    WAITING_APPROVAL = "waiting_approval"
     COMPLETED = "completed"
     FAILED = "failed"
     BLOCKED = "blocked"
@@ -57,7 +59,9 @@ class WorkflowEventType(StrEnum):
 
     WORKFLOW_CREATED = "workflow_created"
     WORKFLOW_STARTED = "workflow_started"
+    WORKFLOW_WAITING_FOR_APPROVAL = "workflow_waiting_for_approval"
     TASK_STARTED = "task_started"
+    TASK_RESUMED = "task_resumed"
     TASK_COMPLETED = "task_completed"
     TASK_FAILED = "task_failed"
     TASK_BLOCKED = "task_blocked"
@@ -70,6 +74,8 @@ class WorkflowEventType(StrEnum):
     TASK_TOOL_EXECUTION_STARTED = "task_tool_execution_started"
     TASK_TOOL_EXECUTION_COMPLETED = "task_tool_execution_completed"
     TASK_TOOL_EXECUTION_FAILED = "task_tool_execution_failed"
+    TASK_APPROVAL_REQUESTED = "task_approval_requested"
+    TASK_APPROVAL_REJECTED = "task_approval_rejected"
 
 
 class WorkflowToolRequest(WorkflowContract):
@@ -146,7 +152,12 @@ class TaskExecutionResult(WorkflowContract):
 
     _ALLOWED_TRANSITIONS: ClassVar[dict[TaskStatus, set[TaskStatus]]] = {
         TaskStatus.PENDING: {TaskStatus.RUNNING, TaskStatus.BLOCKED, TaskStatus.SKIPPED},
-        TaskStatus.RUNNING: {TaskStatus.COMPLETED, TaskStatus.FAILED},
+        TaskStatus.RUNNING: {
+            TaskStatus.COMPLETED,
+            TaskStatus.FAILED,
+            TaskStatus.WAITING_APPROVAL,
+        },
+        TaskStatus.WAITING_APPROVAL: {TaskStatus.RUNNING, TaskStatus.FAILED},
         TaskStatus.COMPLETED: set(),
         TaskStatus.FAILED: set(),
         TaskStatus.BLOCKED: set(),
@@ -215,6 +226,12 @@ class WorkflowExecution(WorkflowContract):
         WorkflowStatus.PENDING: {WorkflowStatus.RUNNING, WorkflowStatus.CANCELLED},
         WorkflowStatus.RUNNING: {
             WorkflowStatus.COMPLETED,
+            WorkflowStatus.FAILED,
+            WorkflowStatus.CANCELLED,
+            WorkflowStatus.WAITING_APPROVAL,
+        },
+        WorkflowStatus.WAITING_APPROVAL: {
+            WorkflowStatus.RUNNING,
             WorkflowStatus.FAILED,
             WorkflowStatus.CANCELLED,
         },
@@ -300,6 +317,19 @@ class WorkflowExecutionSnapshot(WorkflowContract):
                     or result.error is not None
                 ):
                     raise ValueError("running task snapshots cannot contain results or errors")
+            elif result.status == TaskStatus.WAITING_APPROVAL:
+                if result.started_at is None or result.completed_at is not None:
+                    raise ValueError(
+                        "waiting approval task snapshots require a start timestamp "
+                        "but no completion"
+                    )
+                if (
+                    result.tool_result is None
+                    or result.tool_result.status != ToolExecutionStatus.AWAITING_APPROVAL
+                ):
+                    raise ValueError(
+                        "waiting approval task snapshots require an awaiting-approval tool result"
+                    )
             elif result.status == TaskStatus.COMPLETED:
                 if result.started_at is None or result.completed_at is None:
                     raise ValueError("completed task snapshots require lifecycle timestamps")
@@ -333,10 +363,22 @@ class WorkflowExecutionSnapshot(WorkflowContract):
         elif self.status == WorkflowStatus.RUNNING:
             if self.started_at is None or self.completed_at is not None:
                 raise ValueError("running workflow snapshots require only a start time")
+        elif self.status == WorkflowStatus.WAITING_APPROVAL:
+            if self.started_at is None or self.completed_at is not None:
+                raise ValueError("waiting approval workflow snapshots require a start time")
+            if not any(
+                result.status == TaskStatus.WAITING_APPROVAL
+                for result in self.task_results.values()
+            ):
+                raise ValueError(
+                    "waiting approval workflow snapshots must contain a waiting approval task"
+                )
         else:
             if self.completed_at is None:
                 raise ValueError("terminal workflow snapshots must include completed_at")
-            if task_statuses.intersection({TaskStatus.PENDING, TaskStatus.RUNNING}):
+            if task_statuses.intersection(
+                {TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.WAITING_APPROVAL}
+            ):
                 raise ValueError("terminal workflow snapshots cannot contain active tasks")
             if self.status == WorkflowStatus.COMPLETED and task_statuses != {TaskStatus.COMPLETED}:
                 raise ValueError("completed workflow snapshots must contain only completed tasks")

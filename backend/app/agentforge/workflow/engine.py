@@ -1,5 +1,6 @@
 """Sequential deterministic workflow execution using registered agents."""
 
+import hashlib
 import json
 import logging
 from collections import OrderedDict
@@ -41,6 +42,7 @@ from agentforge.domain.workflows.validation import (
 )
 from agentforge.providers.openai import OpenAIChatCompletionsProvider
 from agentforge.tools import (
+    ApprovalGrant,
     ToolExecutionRequest,
     ToolExecutionResult,
     ToolExecutionStatus,
@@ -86,6 +88,7 @@ class WorkflowEngine:
         validator: WorkflowValidator | None = None,
         settings: Settings | None = None,
         tool_executor: ToolExecutor | None = None,
+        approval_repository: object | None = None,
     ) -> None:
         settings = settings or Settings()
         self._agents = dict(agents) if agents is not None else self._configured_agents(settings)
@@ -109,6 +112,10 @@ class WorkflowEngine:
         self._lock = RLock()
         self._active: dict[UUID, WorkflowExecution] = {}
         self._history: OrderedDict[UUID, WorkflowExecutionSnapshot] = OrderedDict()
+        self._pending_approvals: dict[tuple[UUID, str], ApprovalGrant] = {}
+        self._approval_registry: dict[str, ApprovalGrant] = {}
+        self._tool_executor.approval_registry = self._approval_registry  # type: ignore[attr-defined]
+        self._approval_repository = approval_repository
 
     @property
     def planner(self) -> Agent:
@@ -213,27 +220,41 @@ class WorkflowEngine:
         """Run an existing pending execution to a terminal state."""
         with self._lock:
             execution = self._active_execution(execution_id)
-            if execution.status != WorkflowStatus.PENDING:
+            if execution.status == WorkflowStatus.PENDING:
+                started_at = self._now()
+                execution.transition_to(WorkflowStatus.RUNNING)
+                execution.started_at = started_at
+                execution.events.append(
+                    WorkflowEvent(
+                        event_type=WorkflowEventType.WORKFLOW_STARTED,
+                        execution_id=execution.execution_id,
+                        timestamp=started_at,
+                        from_status=WorkflowStatus.PENDING.value,
+                        to_status=WorkflowStatus.RUNNING.value,
+                        metadata={
+                            "workflow_name": execution.workflow.name,
+                            "task_count": len(execution.workflow.tasks),
+                        },
+                    )
+                )
+                self._notify(execution, on_update)
+            elif execution.status != WorkflowStatus.WAITING_APPROVAL:
                 raise InvalidExecutionStateError(
                     f"Execution {execution_id} cannot run from {execution.status.value!r}."
                 )
-            started_at = self._now()
-            execution.transition_to(WorkflowStatus.RUNNING)
-            execution.started_at = started_at
-            execution.events.append(
-                WorkflowEvent(
-                    event_type=WorkflowEventType.WORKFLOW_STARTED,
-                    execution_id=execution.execution_id,
-                    timestamp=started_at,
-                    from_status=WorkflowStatus.PENDING.value,
-                    to_status=WorkflowStatus.RUNNING.value,
-                    metadata={
-                        "workflow_name": execution.workflow.name,
-                        "task_count": len(execution.workflow.tasks),
-                    },
+            else:
+                execution.transition_to(WorkflowStatus.RUNNING)
+                execution.events.append(
+                    WorkflowEvent(
+                        event_type=WorkflowEventType.WORKFLOW_STARTED,
+                        execution_id=execution.execution_id,
+                        timestamp=self._now(),
+                        from_status=WorkflowStatus.WAITING_APPROVAL.value,
+                        to_status=WorkflowStatus.RUNNING.value,
+                        metadata={"workflow_name": execution.workflow.name, "resumed": True},
+                    )
                 )
-            )
-            self._notify(execution, on_update)
+                self._notify(execution, on_update)
             ordered_tasks = self._validator.topological_order(execution.workflow)
 
         executed_steps = 0
@@ -281,6 +302,8 @@ class WorkflowEngine:
             self._run_task(execution, task, on_update)
 
         with self._lock:
+            if execution.status == WorkflowStatus.WAITING_APPROVAL:
+                return execution.model_copy(deep=True)
             if execution.cancellation_requested:
                 self._cancel_running_execution(execution, on_update)
             else:
@@ -313,6 +336,160 @@ class WorkflowEngine:
                 self._notify(execution, on_update)
                 self._archive(execution)
             return execution.model_copy(deep=True)
+
+    def approve(
+        self,
+        execution_id: UUID,
+        *,
+        approved: bool = True,
+        task_id: str | None = None,
+        on_update: ExecutionUpdateCallback | None = None,
+    ) -> WorkflowExecution:
+        """Grant or reject a pending tool approval request and resume the execution."""
+        with self._lock:
+            execution = self._active_execution(execution_id)
+            if execution.status != WorkflowStatus.WAITING_APPROVAL:
+                raise InvalidExecutionStateError(
+                    f"Execution {execution_id} cannot approve while {execution.status.value!r}."
+                )
+            awaiting = [
+                task
+                for task in execution.workflow.tasks
+                if execution.task_results[task.task_id].status == TaskStatus.WAITING_APPROVAL
+            ]
+            if not awaiting:
+                raise InvalidExecutionStateError(
+                    f"Execution {execution_id} has no task waiting for approval."
+                )
+            selected_task = (
+                awaiting[0]
+                if task_id is None
+                else next(
+                    (task for task in awaiting if task.task_id == task_id),
+                    None,
+                )
+            )
+            if selected_task is None:
+                raise InvalidExecutionStateError(f"Task {task_id!r} is not awaiting approval.")
+
+            grant = self._pending_approvals.get((execution_id, selected_task.task_id))
+            if grant is None:
+                raise InvalidExecutionStateError(
+                    f"No approval grant is pending for {selected_task.task_id!r}."
+                )
+
+            if not approved:
+                if self._approval_repository is not None:
+                    self._approval_repository.reject_approval_request(
+                        grant.approval_id,
+                        commit=on_update is None,
+                    )
+                tool_result = execution.task_results[selected_task.task_id].tool_result
+                execution_backup = execution.model_copy(deep=True)
+                completed_at = self._now()
+                execution.transition_to(WorkflowStatus.FAILED)
+                execution.completed_at = completed_at
+                execution.events.append(
+                    WorkflowEvent(
+                        event_type=WorkflowEventType.TASK_APPROVAL_REJECTED,
+                        execution_id=execution_id,
+                        task_id=selected_task.task_id,
+                        timestamp=completed_at,
+                        from_status=TaskStatus.WAITING_APPROVAL.value,
+                        to_status="rejected",
+                        reason="The operator rejected the requested tool action.",
+                        metadata={"tool_id": grant.tool_id},
+                    )
+                )
+                self._fail_task(
+                    execution,
+                    selected_task,
+                    code="approval_rejected",
+                    message="The operator rejected the requested tool action.",
+                    details={"task_id": selected_task.task_id},
+                    tool_result=tool_result,
+                    on_update=None,
+                )
+                execution.events.append(
+                    WorkflowEvent(
+                        event_type=WorkflowEventType.WORKFLOW_FAILED,
+                        execution_id=execution_id,
+                        timestamp=completed_at,
+                        from_status=WorkflowStatus.WAITING_APPROVAL.value,
+                        to_status=WorkflowStatus.FAILED.value,
+                        reason="The operator rejected a protected tool action.",
+                    )
+                )
+                try:
+                    self._notify(execution, on_update)
+                except Exception:
+                    self._active[execution_id] = execution_backup
+                    raise
+                grant.status = "rejected"
+                self._approval_registry.pop(grant.approval_id, None)
+                self._pending_approvals.pop((execution_id, selected_task.task_id), None)
+                self._archive(execution)
+                return execution.model_copy(deep=True)
+
+            if self._approval_repository is not None:
+                self._approval_repository.approve_approval_request(
+                    grant.approval_id,
+                    commit=on_update is None,
+                )
+            execution_backup = execution.model_copy(deep=True)
+            tool_result = execution.task_results[selected_task.task_id].tool_result
+            if (
+                tool_result is not None
+                and tool_result.status == ToolExecutionStatus.AWAITING_APPROVAL
+            ):
+                tool_result.metadata["approval_grant_id"] = grant.approval_id
+                tool_result.metadata["approval_action_digest"] = grant.action_digest
+                tool_result.metadata["approval_status"] = "approved"
+                tool_result.metadata["approval_tool_id"] = grant.tool_id
+                if tool_result.error is not None:
+                    tool_result.error.details = {}
+                execution.events.append(
+                    WorkflowEvent(
+                        event_type=WorkflowEventType.TASK_APPROVAL_REQUESTED,
+                        execution_id=execution.execution_id,
+                        task_id=selected_task.task_id,
+                        timestamp=self._now(),
+                        from_status=ToolExecutionStatus.AWAITING_APPROVAL.value,
+                        to_status=ToolExecutionStatus.SUCCEEDED.value,
+                        metadata={
+                            "approved": True,
+                            "tool_id": selected_task.tool_request.tool_id
+                            if selected_task.tool_request
+                            else None,
+                            "approval_grant_id": grant.approval_id,
+                        },
+                    )
+                )
+        if on_update is None:
+            # The repository committed the decision synchronously above.
+            grant.status = "approved"
+        durable_update_completed = False
+
+        def persist_approval_and_execution(snapshot: WorkflowExecutionSnapshot) -> None:
+            nonlocal durable_update_completed
+            if on_update is not None:
+                on_update(snapshot)
+            durable_update_completed = True
+            grant.status = "approved"
+
+        try:
+            return self.run(
+                execution_id,
+                on_update=(persist_approval_and_execution if on_update is not None else None),
+            )
+        except Exception:
+            if on_update is not None and not durable_update_completed:
+                with self._lock:
+                    self._active[execution_id] = execution_backup
+                    grant.status = "pending"
+                    self._approval_registry[grant.approval_id] = grant
+                    self._pending_approvals[(execution_id, selected_task.task_id)] = grant
+            raise
 
     def cancel(
         self,
@@ -363,6 +540,64 @@ class WorkflowEngine:
                         )
                     )
                     self._notify(execution, on_update)
+                return execution.snapshot()
+
+            if execution.status == WorkflowStatus.WAITING_APPROVAL:
+                waiting_tasks = [
+                    task
+                    for task in execution.workflow.tasks
+                    if execution.task_results[task.task_id].status == TaskStatus.WAITING_APPROVAL
+                ]
+                grants = [
+                    self._pending_approvals.get((execution_id, task.task_id))
+                    for task in waiting_tasks
+                ]
+                for grant in grants:
+                    if grant is not None and self._approval_repository is not None:
+                        self._approval_repository.reject_approval_request(UUID(grant.approval_id))
+                completed_at = self._now()
+                execution.transition_to(WorkflowStatus.CANCELLED)
+                execution.completed_at = completed_at
+                for task in execution.workflow.tasks:
+                    if execution.task_results[task.task_id].status == TaskStatus.PENDING:
+                        self._skip_task(
+                            execution,
+                            task,
+                            code="workflow_cancelled",
+                            message="Task was not run because the workflow was cancelled.",
+                        )
+                for task, grant in zip(waiting_tasks, grants, strict=True):
+                    if grant is None:
+                        self._fail_task(
+                            execution,
+                            task,
+                            code="approval_cancelled",
+                            message="The approval request was cancelled.",
+                            on_update=None,
+                        )
+                    else:
+                        grant.status = "rejected"
+                        self._approval_registry.pop(grant.approval_id, None)
+                        self._pending_approvals.pop((execution_id, task.task_id), None)
+                        self._fail_task(
+                            execution,
+                            task,
+                            code="approval_cancelled",
+                            message="The approval request was cancelled.",
+                            on_update=None,
+                        )
+                execution.events.append(
+                    WorkflowEvent(
+                        event_type=WorkflowEventType.WORKFLOW_CANCELLED,
+                        execution_id=execution_id,
+                        timestamp=completed_at,
+                        from_status=WorkflowStatus.WAITING_APPROVAL.value,
+                        to_status=WorkflowStatus.CANCELLED.value,
+                        reason="Workflow cancelled while awaiting operator approval.",
+                    )
+                )
+                self._notify(execution, on_update)
+                self._archive(execution)
                 return execution.snapshot()
 
             raise InvalidExecutionStateError(
@@ -547,6 +782,20 @@ class WorkflowEngine:
                 workflow_execution_id=str(execution.execution_id),
                 task_id=task.task_id,
             )
+            request.approval_grant = self._pending_approvals.get(
+                (execution.execution_id, task.task_id)
+            )
+            tool_definition = self._tool_executor.registry.get_by_id(request.tool_id)
+            if (
+                tool_definition is not None
+                and tool_definition.requires_approval
+                and request.approval_grant is None
+            ):
+                request.approval_grant = self._generate_approval_grant(
+                    execution,
+                    task,
+                    task.tool_request.arguments,
+                )
             with self._lock:
                 execution.events.append(
                     WorkflowEvent(
@@ -562,6 +811,53 @@ class WorkflowEngine:
                 request,
                 agent_capabilities=agent.supported_capabilities,
             )
+            if (
+                tool_definition is not None
+                and tool_definition.requires_approval
+                and tool_result.status == ToolExecutionStatus.AWAITING_APPROVAL
+            ):
+                with self._lock:
+                    grant = request.approval_grant
+                    if grant is not None:
+                        self._pending_approvals[(execution.execution_id, task.task_id)] = grant
+                        self._approval_registry[grant.approval_id] = grant
+                        grant.status = "pending"
+                    result = execution.task_results[task.task_id]
+                    safe_result = self._safe_tool_result(tool_result)
+                    safe_result.metadata["approval_grant_id"] = grant.approval_id if grant else None
+                    safe_result.metadata["approval_action_digest"] = (
+                        grant.action_digest if grant else None
+                    )
+                    safe_result.metadata["approval_status"] = "pending"
+                    safe_result.metadata["approval_description"] = (
+                        grant.action_description if grant else task.tool_request.tool_id
+                    )
+                    result.tool_result = safe_result
+                    result.transition_to(TaskStatus.WAITING_APPROVAL)
+                    execution.transition_to(WorkflowStatus.WAITING_APPROVAL)
+                    execution.events.append(
+                        WorkflowEvent(
+                            event_type=WorkflowEventType.TASK_APPROVAL_REQUESTED,
+                            execution_id=execution.execution_id,
+                            task_id=task.task_id,
+                            timestamp=self._now(),
+                            metadata={
+                                "tool_id": task.tool_request.tool_id,
+                                "tool_status": tool_result.status.value,
+                            },
+                        )
+                    )
+                    execution.events.append(
+                        WorkflowEvent(
+                            event_type=WorkflowEventType.WORKFLOW_WAITING_FOR_APPROVAL,
+                            execution_id=execution.execution_id,
+                            task_id=task.task_id,
+                            timestamp=self._now(),
+                            metadata={"tool_id": task.tool_request.tool_id},
+                        )
+                    )
+                    self._notify(execution, on_update)
+                return
             safe_tool_result = self._safe_tool_result(tool_result)
             succeeded = tool_result.status == ToolExecutionStatus.SUCCEEDED
             with self._lock:
@@ -653,17 +949,29 @@ class WorkflowEngine:
         on_update: ExecutionUpdateCallback | None,
     ) -> None:
         result = execution.task_results[task.task_id]
+        resuming_approval = result.status == TaskStatus.WAITING_APPROVAL
+        if resuming_approval:
+            result.tool_result = None
         started_at = self._now()
         result.transition_to(TaskStatus.RUNNING)
         result.started_at = started_at
-        execution.execution_order.append(task.task_id)
+        if task.task_id not in execution.execution_order:
+            execution.execution_order.append(task.task_id)
         execution.events.append(
             WorkflowEvent(
-                event_type=WorkflowEventType.TASK_STARTED,
+                event_type=(
+                    WorkflowEventType.TASK_RESUMED
+                    if resuming_approval
+                    else WorkflowEventType.TASK_STARTED
+                ),
                 execution_id=execution.execution_id,
                 task_id=task.task_id,
                 timestamp=started_at,
-                from_status=TaskStatus.PENDING.value,
+                from_status=(
+                    TaskStatus.WAITING_APPROVAL.value
+                    if resuming_approval
+                    else TaskStatus.PENDING.value
+                ),
                 to_status=TaskStatus.RUNNING.value,
                 metadata={"agent_type": task.agent_type.value},
             )
@@ -876,6 +1184,65 @@ class WorkflowEngine:
             separators=(",", ":"),
         ).encode("utf-8")
         return len(encoded)
+
+    @staticmethod
+    def _approval_action_digest(
+        execution_id: UUID, task_id: str, tool_id: str, arguments: object
+    ) -> str:
+        payload = json.dumps(
+            {
+                "execution_id": str(execution_id),
+                "task_id": task_id,
+                "tool_id": tool_id,
+                "arguments": arguments,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:64]
+
+    def _generate_approval_grant(
+        self,
+        execution: WorkflowExecution,
+        task: WorkflowTask,
+        arguments: object,
+    ) -> ApprovalGrant:
+        action_description = (
+            f"Approve executing tool {task.tool_request.tool_id} for task {task.task_id}."
+            if task.tool_request is not None
+            else f"Approve executing tool for task {task.task_id}."
+        )
+        grant = ApprovalGrant(
+            execution_id=str(execution.execution_id),
+            task_id=task.task_id,
+            tool_id=task.tool_request.tool_id if task.tool_request is not None else "",
+            action_description=action_description,
+            action_digest=self._approval_action_digest(
+                execution.execution_id,
+                task.task_id,
+                task.tool_request.tool_id if task.tool_request is not None else "",
+                arguments,
+            ),
+            safe_arguments=(arguments if isinstance(arguments, dict) else {"input": arguments}),
+        )
+        # Persist the pending approval request durably so it survives
+        # application restart and can be validated against the database.
+        if self._approval_repository is not None:
+            self._approval_repository.create_approval_request(
+                approval_id=UUID(grant.approval_id),
+                execution_id=execution.execution_id,
+                execution_step_id=self._approval_repository.get_execution_step_id(
+                    execution_id=execution.execution_id,
+                    task_id=task.task_id,
+                ),
+                action_description=action_description,
+                action_digest=grant.action_digest,
+                safe_arguments={},
+            )
+        self._approval_registry[grant.approval_id] = grant
+        self._pending_approvals[(execution.execution_id, task.task_id)] = grant
+        return grant
 
     @staticmethod
     def _safe_tool_result(result: ToolExecutionResult) -> ToolExecutionResult:

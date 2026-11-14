@@ -1,12 +1,18 @@
 """Persistence operations for workflow execution snapshots."""
 
+from datetime import UTC, datetime
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import String, cast, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from agentforge.domain.models import ExecutionEvent, ExecutionStep, WorkflowExecution
+from agentforge.domain.models import (
+    ApprovalRequest,
+    ExecutionEvent,
+    ExecutionStep,
+    WorkflowExecution,
+)
 from agentforge.domain.models.workflow import Workflow
 from agentforge.domain.workflows.models import (
     TaskExecutionResult,
@@ -32,6 +38,7 @@ _EVENT_DETAILS = {
     WorkflowEventType.WORKFLOW_CREATED: {"workflow_name", "task_count"},
     WorkflowEventType.WORKFLOW_STARTED: {"workflow_name", "task_count"},
     WorkflowEventType.TASK_STARTED: {"agent_type"},
+    WorkflowEventType.TASK_RESUMED: {"agent_type"},
     WorkflowEventType.TASK_COMPLETED: {"agent_type", "execution_duration_ms"},
     WorkflowEventType.TASK_FAILED: {"agent_type"},
     WorkflowEventType.TASK_BLOCKED: {"blocked_by"},
@@ -39,6 +46,7 @@ _EVENT_DETAILS = {
     WorkflowEventType.TASK_TOOL_EXECUTION_STARTED: {"tool_id"},
     WorkflowEventType.TASK_TOOL_EXECUTION_COMPLETED: {"tool_id", "status"},
     WorkflowEventType.TASK_TOOL_EXECUTION_FAILED: {"tool_id", "status"},
+    WorkflowEventType.TASK_APPROVAL_REJECTED: {"tool_id"},
 }
 _TERMINAL_WORKFLOW_STATUSES = {
     WorkflowStatus.COMPLETED,
@@ -59,6 +67,9 @@ class ExecutionRepository:
 
     def __init__(self, session: Session) -> None:
         self._session = session
+        # Repository methods return ORM records for immediate response mapping;
+        # keep committed values available after the request session closes.
+        self._session.expire_on_commit = False
 
     def create_execution(
         self,
@@ -203,6 +214,109 @@ class ExecutionRepository:
             self._snapshot(record),
             WorkflowDefinition.model_validate(record.workflow.workflow_definition),
         )
+
+    def create_approval_request(
+        self,
+        *,
+        approval_id: UUID | None = None,
+        execution_id: UUID,
+        execution_step_id: UUID | None,
+        action_description: str,
+        action_digest: str,
+        safe_arguments: dict[str, Any],
+    ) -> ApprovalRequest:
+        """Create and persist a pending approval request bound to an execution."""
+        approval = ApprovalRequest(
+            id=approval_id or uuid4(),
+            execution_id=execution_id,
+            execution_step_id=execution_step_id,
+            action_description=action_description,
+            action_digest=action_digest,
+            safe_arguments=safe_arguments,
+            status="pending",
+        )
+        self._session.add(approval)
+        self._session.flush()
+        return approval
+
+    def approve_approval_request(
+        self, approval_id: UUID, *, commit: bool = True
+    ) -> ApprovalRequest:
+        """Mark a pending approval request as approved and record the review time."""
+        approval = self._session.scalar(
+            select(ApprovalRequest).where(ApprovalRequest.id == approval_id).with_for_update()
+        )
+        if approval is None:
+            raise ExecutionPersistenceError(f"Approval request {approval_id} was not found.")
+        if approval.status != "pending":
+            raise ExecutionPersistenceError(
+                f"Approval request {approval_id} is not pending (status={approval.status!r})."
+            )
+        approval.status = "approved"
+        approval.reviewed_at = datetime.now(UTC)
+        self._finish_approval_decision(commit=commit)
+        return approval
+
+    def reject_approval_request(self, approval_id: UUID, *, commit: bool = True) -> ApprovalRequest:
+        """Mark a pending approval request as rejected and record the review time."""
+        approval = self._session.scalar(
+            select(ApprovalRequest).where(ApprovalRequest.id == approval_id).with_for_update()
+        )
+        if approval is None:
+            raise ExecutionPersistenceError(f"Approval request {approval_id} was not found.")
+        if approval.status != "pending":
+            raise ExecutionPersistenceError(
+                f"Approval request {approval_id} is not pending (status={approval.status!r})."
+            )
+        approval.status = "rejected"
+        approval.reviewed_at = datetime.now(UTC)
+        self._finish_approval_decision(commit=commit)
+        return approval
+
+    def _finish_approval_decision(self, *, commit: bool) -> None:
+        try:
+            if commit:
+                self._session.commit()
+            else:
+                self._session.flush()
+        except Exception as exc:
+            self._session.rollback()
+            raise ExecutionPersistenceError("Could not persist approval decision.") from exc
+
+    def get_pending_approval_requests(self, *, execution_id: UUID) -> list[ApprovalRequest]:
+        """Return all pending approval requests for an execution."""
+        return list(
+            self._session.scalars(
+                select(ApprovalRequest).where(
+                    ApprovalRequest.execution_id == execution_id,
+                    ApprovalRequest.status == "pending",
+                )
+            )
+        )
+
+    def get_approval_requests(self, *, execution_id: UUID) -> list[ApprovalRequest]:
+        """Return approval rows for one execution, newest first."""
+        return list(
+            self._session.scalars(
+                select(ApprovalRequest)
+                .where(ApprovalRequest.execution_id == execution_id)
+                .order_by(ApprovalRequest.requested_at.desc())
+            )
+        )
+
+    def get_execution_step_id(self, *, execution_id: UUID, task_id: str) -> UUID | None:
+        """Resolve a stable persisted task step for binding approval requests."""
+        return self._session.scalar(
+            select(ExecutionStep.id).where(
+                ExecutionStep.execution_id == execution_id,
+                ExecutionStep.task_id == task_id,
+                ExecutionStep.attempt_number == 1,
+            )
+        )
+
+    def get_approval_request_by_id(self, approval_id: UUID) -> ApprovalRequest | None:
+        """Return an approval request by its identifier, or None if absent."""
+        return self._session.get(ApprovalRequest, approval_id)
 
     def list_executions(
         self,

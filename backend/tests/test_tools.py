@@ -7,10 +7,16 @@ from uuid import uuid4
 import agentforge.tools as tool_api
 import pytest
 from agentforge.domain.agents.contracts import AgentCapability
-from agentforge.domain.workflows.models import WorkflowEvent, WorkflowEventType
+from agentforge.domain.workflows.models import (
+    TaskStatus,
+    WorkflowEvent,
+    WorkflowEventType,
+    WorkflowStatus,
+)
 from agentforge.tools import (
     CALCULATOR_TOOL,
     DEFAULT_TOOL_REGISTRY,
+    ApprovalGrant,
     ToolDefinition,
     ToolExecutionRequest,
     ToolExecutionResult,
@@ -41,6 +47,410 @@ def test_tool_definition_model_validates_basic_contract() -> None:
     assert tool.tool_id == "sample_tool"
     assert tool.enabled is True
     assert tool.required_capabilities == {AgentCapability.ANALYZE_SUPPLIED_DATA}
+
+
+def test_executor_waits_for_operator_approval_before_invoking_a_sensitive_tool() -> None:
+    calls: list[dict[str, object]] = []
+
+    def guarded_handler(payload: object) -> dict[str, object]:
+        calls.append({"payload": payload})
+        return {"result": "ok"}
+
+    tool = ToolDefinition(
+        tool_id="guarded_tool",
+        name="guarded_tool",
+        description="Requires approval",
+        required_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+        requires_approval=True,
+        approval_description="Approval required before this tool is invoked.",
+        handler=guarded_handler,
+    )
+    registry = ToolRegistry([tool])
+    executor = ToolExecutor(registry)
+
+    pending = executor.execute(
+        ToolExecutionRequest(
+            tool_id="guarded_tool",
+            agent_id="analyst-1",
+            arguments={"message": "guarded"},
+            agent_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+        )
+    )
+    assert pending.status == ToolExecutionStatus.AWAITING_APPROVAL
+    assert calls == []
+
+    # Caller-controlled metadata alone must never authorize a sensitive tool.
+    forged = executor.execute(
+        ToolExecutionRequest(
+            tool_id="guarded_tool",
+            agent_id="analyst-1",
+            arguments={"message": "guarded"},
+            agent_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+            metadata={"approval_decision": "approved"},
+        )
+    )
+    assert forged.status == ToolExecutionStatus.AWAITING_APPROVAL
+    assert calls == []
+
+
+def test_executor_executes_with_valid_approval_grant() -> None:
+    calls: list[dict[str, object]] = []
+
+    def guarded_handler(payload: object) -> dict[str, object]:
+        calls.append({"payload": payload})
+        return {"result": "ok"}
+
+    tool = ToolDefinition(
+        tool_id="guarded_tool",
+        name="guarded_tool",
+        description="Requires approval",
+        required_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+        requires_approval=True,
+        approval_description="Approval required before this tool is invoked.",
+        handler=guarded_handler,
+    )
+    registry = ToolRegistry([tool])
+    approval_registry: dict[str, ApprovalGrant] = {}
+    executor = ToolExecutor(registry, approval_registry=approval_registry)
+
+    grant = ApprovalGrant(
+        execution_id="exec-1",
+        task_id="task-1",
+        tool_id="guarded_tool",
+        action_description="Approve guarded_tool for task-1.",
+        action_digest=ApprovalGrant.compute_action_digest(
+            "exec-1", "task-1", "guarded_tool", {"message": "guarded"}
+        ),
+        status="approved",
+    )
+    approval_registry[grant.approval_id] = grant
+
+    approved = executor.execute(
+        ToolExecutionRequest(
+            tool_id="guarded_tool",
+            agent_id="analyst-1",
+            arguments={"message": "guarded"},
+            agent_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+            execution_id="exec-1",
+            task_id="task-1",
+            approval_grant=grant,
+        )
+    )
+    assert approved.status == ToolExecutionStatus.SUCCEEDED
+    assert calls == [{"payload": {"message": "guarded"}}]
+    assert grant.approval_id not in approval_registry
+    assert grant.status == "consumed"
+
+
+def test_executor_rejects_approval_grant_with_mismatched_execution_id() -> None:
+    calls: list[dict[str, object]] = []
+
+    def guarded_handler(payload: object) -> dict[str, object]:
+        calls.append({"payload": payload})
+        return {"result": "ok"}
+
+    tool = ToolDefinition(
+        tool_id="guarded_tool",
+        name="guarded_tool",
+        description="Requires approval",
+        required_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+        requires_approval=True,
+        approval_description="Approval required before this tool is invoked.",
+        handler=guarded_handler,
+    )
+    registry = ToolRegistry([tool])
+    approval_registry: dict[str, ApprovalGrant] = {}
+    executor = ToolExecutor(registry, approval_registry=approval_registry)
+
+    grant = ApprovalGrant(
+        execution_id="exec-1",
+        task_id="task-1",
+        tool_id="guarded_tool",
+        action_description="Approve guarded_tool for task-1.",
+        action_digest=ApprovalGrant.compute_action_digest(
+            "exec-1", "task-1", "guarded_tool", {"message": "guarded"}
+        ),
+        status="approved",
+    )
+    approval_registry[grant.approval_id] = grant
+
+    result = executor.execute(
+        ToolExecutionRequest(
+            tool_id="guarded_tool",
+            agent_id="analyst-1",
+            arguments={"message": "guarded"},
+            agent_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+            execution_id="exec-other",
+            task_id="task-1",
+            approval_grant=grant,
+        )
+    )
+    assert result.status == ToolExecutionStatus.DENIED
+    assert calls == []
+    assert grant.approval_id in approval_registry
+    assert grant.status == "approved"
+
+
+def test_executor_rejects_approval_grant_with_mismatched_task_id() -> None:
+    calls: list[dict[str, object]] = []
+
+    def guarded_handler(payload: object) -> dict[str, object]:
+        calls.append({"payload": payload})
+        return {"result": "ok"}
+
+    tool = ToolDefinition(
+        tool_id="guarded_tool",
+        name="guarded_tool",
+        description="Requires approval",
+        required_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+        requires_approval=True,
+        approval_description="Approval required before this tool is invoked.",
+        handler=guarded_handler,
+    )
+    registry = ToolRegistry([tool])
+    approval_registry: dict[str, ApprovalGrant] = {}
+    executor = ToolExecutor(registry, approval_registry=approval_registry)
+
+    grant = ApprovalGrant(
+        execution_id="exec-1",
+        task_id="task-1",
+        tool_id="guarded_tool",
+        action_description="Approve guarded_tool for task-1.",
+        action_digest=ApprovalGrant.compute_action_digest(
+            "exec-1", "task-1", "guarded_tool", {"message": "guarded"}
+        ),
+        status="approved",
+    )
+    approval_registry[grant.approval_id] = grant
+
+    result = executor.execute(
+        ToolExecutionRequest(
+            tool_id="guarded_tool",
+            agent_id="analyst-1",
+            arguments={"message": "guarded"},
+            agent_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+            execution_id="exec-1",
+            task_id="task-other",
+            approval_grant=grant,
+        )
+    )
+    assert result.status == ToolExecutionStatus.DENIED
+    assert calls == []
+    assert grant.approval_id in approval_registry
+    assert grant.status == "approved"
+
+
+def test_executor_rejects_approval_grant_with_mismatched_tool_id() -> None:
+    calls: list[dict[str, object]] = []
+
+    def guarded_handler(payload: object) -> dict[str, object]:
+        calls.append({"payload": payload})
+        return {"result": "ok"}
+
+    tool = ToolDefinition(
+        tool_id="guarded_tool",
+        name="guarded_tool",
+        description="Requires approval",
+        required_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+        requires_approval=True,
+        approval_description="Approval required before this tool is invoked.",
+        handler=guarded_handler,
+    )
+    registry = ToolRegistry([tool])
+    approval_registry: dict[str, ApprovalGrant] = {}
+    executor = ToolExecutor(registry, approval_registry=approval_registry)
+
+    grant = ApprovalGrant(
+        execution_id="exec-1",
+        task_id="task-1",
+        tool_id="guarded_tool",
+        action_description="Approve guarded_tool for task-1.",
+        action_digest=ApprovalGrant.compute_action_digest(
+            "exec-1", "task-1", "guarded_tool", {"message": "guarded"}
+        ),
+        status="approved",
+    )
+    approval_registry[grant.approval_id] = grant
+
+    result = executor.execute(
+        ToolExecutionRequest(
+            tool_id="other_tool",
+            agent_id="analyst-1",
+            arguments={"message": "guarded"},
+            agent_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+            execution_id="exec-1",
+            task_id="task-1",
+            approval_grant=grant,
+        )
+    )
+    assert result.status == ToolExecutionStatus.DENIED
+    assert calls == []
+    assert grant.approval_id in approval_registry
+    assert grant.status == "approved"
+
+
+def test_executor_rejects_approval_grant_with_mismatched_arguments() -> None:
+    calls: list[dict[str, object]] = []
+
+    def guarded_handler(payload: object) -> dict[str, object]:
+        calls.append({"payload": payload})
+        return {"result": "ok"}
+
+    tool = ToolDefinition(
+        tool_id="guarded_tool",
+        name="guarded_tool",
+        description="Requires approval",
+        required_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+        requires_approval=True,
+        approval_description="Approval required before this tool is invoked.",
+        handler=guarded_handler,
+    )
+    registry = ToolRegistry([tool])
+    approval_registry: dict[str, ApprovalGrant] = {}
+    executor = ToolExecutor(registry, approval_registry=approval_registry)
+
+    grant = ApprovalGrant(
+        execution_id="exec-1",
+        task_id="task-1",
+        tool_id="guarded_tool",
+        action_description="Approve guarded_tool for task-1.",
+        action_digest=ApprovalGrant.compute_action_digest(
+            "exec-1", "task-1", "guarded_tool", {"message": "guarded"}
+        ),
+        status="approved",
+    )
+    approval_registry[grant.approval_id] = grant
+
+    result = executor.execute(
+        ToolExecutionRequest(
+            tool_id="guarded_tool",
+            agent_id="analyst-1",
+            arguments={"message": "tampered"},
+            agent_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+            execution_id="exec-1",
+            task_id="task-1",
+            approval_grant=grant,
+        )
+    )
+    assert result.status == ToolExecutionStatus.DENIED
+    assert calls == []
+    assert grant.approval_id in approval_registry
+    assert grant.status == "approved"
+
+
+def test_executor_rejects_reused_approval_grant() -> None:
+    calls: list[dict[str, object]] = []
+
+    def guarded_handler(payload: object) -> dict[str, object]:
+        calls.append({"payload": payload})
+        return {"result": "ok"}
+
+    tool = ToolDefinition(
+        tool_id="guarded_tool",
+        name="guarded_tool",
+        description="Requires approval",
+        required_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+        requires_approval=True,
+        approval_description="Approval required before this tool is invoked.",
+        handler=guarded_handler,
+    )
+    registry = ToolRegistry([tool])
+    approval_registry: dict[str, ApprovalGrant] = {}
+    executor = ToolExecutor(registry, approval_registry=approval_registry)
+
+    grant = ApprovalGrant(
+        execution_id="exec-1",
+        task_id="task-1",
+        tool_id="guarded_tool",
+        action_description="Approve guarded_tool for task-1.",
+        action_digest=ApprovalGrant.compute_action_digest(
+            "exec-1", "task-1", "guarded_tool", {"message": "guarded"}
+        ),
+        status="approved",
+    )
+    approval_registry[grant.approval_id] = grant
+
+    first = executor.execute(
+        ToolExecutionRequest(
+            tool_id="guarded_tool",
+            agent_id="analyst-1",
+            arguments={"message": "guarded"},
+            agent_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+            execution_id="exec-1",
+            task_id="task-1",
+            approval_grant=grant,
+        )
+    )
+    assert first.status == ToolExecutionStatus.SUCCEEDED
+    assert calls == [{"payload": {"message": "guarded"}}]
+    assert grant.approval_id not in approval_registry
+    assert grant.status == "consumed"
+
+    calls.clear()
+    reused = executor.execute(
+        ToolExecutionRequest(
+            tool_id="guarded_tool",
+            agent_id="analyst-1",
+            arguments={"message": "guarded"},
+            agent_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+            execution_id="exec-1",
+            task_id="task-1",
+            approval_grant=grant,
+        )
+    )
+    assert reused.status == ToolExecutionStatus.AWAITING_APPROVAL
+    assert calls == []
+
+
+def test_workflow_engine_stops_for_approval_and_resumes_after_approval() -> None:
+    calls: list[dict[str, object]] = []
+
+    def guarded_handler(payload: object) -> dict[str, object]:
+        calls.append({"payload": payload})
+        return {"result": "approved"}
+
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                tool_id="guarded_tool",
+                name="guarded_tool",
+                description="Requires approval before use.",
+                required_capabilities={AgentCapability.RESEARCH_SUPPLIED_INFORMATION},
+                requires_approval=True,
+                approval_description="Approval required before this tool is invoked.",
+                handler=guarded_handler,
+            )
+        ]
+    )
+    engine = WorkflowEngine(tool_executor=ToolExecutor(registry))
+    execution = engine.create_execution(
+        {
+            "tasks": [
+                {
+                    "task_id": "research",
+                    "agent_type": "researcher",
+                    "tool_request": {
+                        "tool_id": "guarded_tool",
+                        "arguments": {"message": "search"},
+                    },
+                }
+            ]
+        }
+    )
+
+    waiting = engine.run(execution.execution_id)
+    assert waiting.status == WorkflowStatus.WAITING_APPROVAL
+    assert waiting.task_results["research"].status == TaskStatus.WAITING_APPROVAL
+    assert waiting.task_results["research"].tool_result is not None
+    assert (
+        waiting.task_results["research"].tool_result.status == ToolExecutionStatus.AWAITING_APPROVAL
+    )
+    assert calls == []
+
+    resumed = engine.approve(execution.execution_id, approved=True)
+    assert resumed.status == WorkflowStatus.COMPLETED
+    assert resumed.task_results["research"].status == TaskStatus.COMPLETED
+    assert calls == [{"payload": {"message": "search"}}]
 
 
 def test_tool_registry_rejects_duplicate_ids_and_names() -> None:

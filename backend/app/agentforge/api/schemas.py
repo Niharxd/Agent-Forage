@@ -104,6 +104,27 @@ class ExecutionResponse(BaseModel):
     workflow_plan: list[ExecutionPlanTask] | None = None
 
 
+class ExecutionApprovalRequest(BaseModel):
+    """Operator approval or rejection for a specific awaiting approval task."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    task_id: str | None = Field(default=None, min_length=1, max_length=128)
+    reason: str | None = Field(default=None, min_length=1, max_length=500)
+
+
+class ExecutionApprovalResponse(BaseModel):
+    """Safe approval status without exposing action arguments or digests."""
+
+    approval_id: UUID
+    execution_id: UUID
+    task_id: str | None = None
+    action_description: str
+    status: str
+    requested_at: datetime
+    reviewed_at: datetime | None = None
+
+
 class ExecutionListResponse(BaseModel):
     """Paginated collection of persisted executions."""
 

@@ -10,7 +10,10 @@ def require_api_access_token(request: Request) -> None:
     settings = request.app.state.settings
     expected_token = settings.api_access_token
     if expected_token is None:
-        raise RuntimeError("API access token is not configured for protected routes.")
+        raise HTTPException(
+            status_code=503,
+            detail="Operator authentication is unavailable.",
+        )
 
     authorization = request.headers.get("authorization", "")
     scheme, separator, supplied_token = authorization.partition(" ")

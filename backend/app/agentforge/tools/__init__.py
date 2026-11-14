@@ -1,6 +1,7 @@
 """Registered tool interfaces, controlled execution, and safe local adapters."""
 
 from agentforge.tools.contracts import (
+    ApprovalGrant,
     ToolDefinition,
     ToolExecutionError,
     ToolExecutionRequest,
@@ -25,6 +26,7 @@ from agentforge.tools.safe_tools import (
 )
 
 __all__ = [
+    "ApprovalGrant",
     "CALCULATOR_TOOL",
     "DEFAULT_TOOL_REGISTRY",
     "JSON_INSPECTION_TOOL",

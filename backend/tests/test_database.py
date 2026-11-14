@@ -13,6 +13,7 @@ from agentforge.api.services.workflows import create_planned_workflow_execution
 from agentforge.config.settings import Settings
 from agentforge.database.dependencies import get_db_session
 from agentforge.database.engine import create_database_engine
+from agentforge.domain.agents.contracts import AgentCapability, AgentRole
 from agentforge.domain.models import (
     ApprovalRequest,
     Base,
@@ -29,8 +30,15 @@ from agentforge.domain.workflows.models import (
     WorkflowEventType,
     WorkflowExecutionSnapshot,
     WorkflowStatus,
+    WorkflowTask,
+    WorkflowToolRequest,
 )
 from agentforge.main import create_app
+from agentforge.tools import (
+    ToolDefinition,
+    ToolExecutor,
+    ToolRegistry,
+)
 from agentforge.workflow import ExecutionNotFoundError, WorkflowEngine
 from agentforge.workflow.orchestrator import WorkflowOrchestrator
 from alembic import command
@@ -39,6 +47,7 @@ from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from fastapi import Depends
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -975,3 +984,536 @@ def test_persisted_execution_api_survives_engine_history_replacement(
     assert listing.json()["total"] >= 2
     assert cancellation.status_code == 200
     assert cancellation.json()["status"] == "cancelled"
+
+
+def _approval_tool_registry() -> ToolRegistry:
+    """Create a tool registry with a single tool that requires approval."""
+
+    def guarded_handler(payload: object) -> dict[str, object]:
+        return {"result": "ok"}
+
+    tool = ToolDefinition(
+        tool_id="guarded_tool",
+        name="guarded_tool",
+        description="Requires approval before use.",
+        required_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+        requires_approval=True,
+        approval_description="Approval required before this tool is invoked.",
+        handler=guarded_handler,
+    )
+    return ToolRegistry([tool])
+
+
+def _create_minimal_execution(session: Session) -> UUID:
+    """Create a minimal workflow execution and return its ID."""
+    workflow = Workflow(
+        name=f"wf-{uuid4().hex}",
+        description="Minimal workflow for approval tests.",
+        workflow_definition={"schema_version": 1, "steps": []},
+        version=1,
+    )
+    session.add(workflow)
+    session.flush()
+    execution = WorkflowExecution(
+        workflow_id=workflow.id,
+        original_task="Test task",
+        status="pending",
+    )
+    session.add(execution)
+    session.flush()
+    session.commit()
+    return execution.id
+
+
+def test_approval_request_is_persisted_as_pending(migrated_database: Engine) -> None:
+    """A newly created approval request is durably stored with pending status."""
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        execution_id = _create_minimal_execution(session)
+        approval = repository.create_approval_request(
+            execution_id=execution_id,
+            execution_step_id=None,
+            action_description="Approve executing tool guarded_tool for task task-1.",
+            action_digest="a" * 64,
+            safe_arguments={"message": "test"},
+        )
+        session.commit()
+
+    assert approval.id is not None
+    assert approval.execution_id == execution_id
+    assert approval.status == "pending"
+    assert approval.reviewed_at is None
+    assert approval.requested_at is not None
+
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        pending = repository.get_pending_approval_requests(execution_id=execution_id)
+        assert len(pending) == 1
+        assert pending[0].status == "pending"
+        assert pending[0].action_digest == "a" * 64
+
+
+def test_approval_decision_is_persisted_as_approved(migrated_database: Engine) -> None:
+    """Approving a pending request persists the approved status and review time."""
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        execution_id = _create_minimal_execution(session)
+        approval = repository.create_approval_request(
+            execution_id=execution_id,
+            execution_step_id=None,
+            action_description="Test approval",
+            action_digest="a" * 64,
+            safe_arguments={"key": "value"},
+        )
+        session.commit()
+        approval_id = approval.id
+
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        updated = repository.approve_approval_request(approval_id)
+        assert updated.status == "approved"
+        assert updated.reviewed_at is not None
+
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        pending = repository.get_pending_approval_requests(execution_id=execution_id)
+        assert len(pending) == 0
+
+        record = repository.get_approval_request_by_id(approval_id)
+        assert record is not None
+        assert record.status == "approved"
+
+
+def test_rejection_decision_is_persisted_as_rejected(migrated_database: Engine) -> None:
+    """Rejecting a pending request persists the rejected status and review time."""
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        execution_id = _create_minimal_execution(session)
+        approval = repository.create_approval_request(
+            execution_id=execution_id,
+            execution_step_id=None,
+            action_description="Test approval",
+            action_digest="a" * 64,
+            safe_arguments={"key": "value"},
+        )
+        session.commit()
+        approval_id = approval.id
+
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        updated = repository.reject_approval_request(approval_id)
+        assert updated.status == "rejected"
+        assert updated.reviewed_at is not None
+
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        pending = repository.get_pending_approval_requests(execution_id=execution_id)
+        assert len(pending) == 0
+
+        record = repository.get_approval_request_by_id(approval_id)
+        assert record is not None
+        assert record.status == "rejected"
+
+
+def test_approve_already_reviewed_approval_raises_error(migrated_database: Engine) -> None:
+    """Approving an already-approved or rejected request raises an error."""
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        execution_id = _create_minimal_execution(session)
+        approval = repository.create_approval_request(
+            execution_id=execution_id,
+            execution_step_id=None,
+            action_description="Test approval",
+            action_digest="a" * 64,
+            safe_arguments={},
+        )
+        repository.approve_approval_request(approval.id)
+        session.commit()
+
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        with pytest.raises(ExecutionPersistenceError, match="not pending"):
+            repository.approve_approval_request(approval.id)
+
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        with pytest.raises(ExecutionPersistenceError, match="not pending"):
+            repository.reject_approval_request(approval.id)
+
+
+def test_reject_already_reviewed_approval_raises_error(migrated_database: Engine) -> None:
+    """Rejecting an already-approved or rejected request raises an error."""
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        execution_id = _create_minimal_execution(session)
+        approval = repository.create_approval_request(
+            execution_id=execution_id,
+            execution_step_id=None,
+            action_description="Test approval",
+            action_digest="a" * 64,
+            safe_arguments={},
+        )
+        repository.reject_approval_request(approval.id)
+
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        with pytest.raises(ExecutionPersistenceError, match="not pending"):
+            repository.reject_approval_request(approval.id)
+
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        with pytest.raises(ExecutionPersistenceError, match="not pending"):
+            repository.approve_approval_request(approval.id)
+
+
+def test_approval_request_not_found_raises_error(migrated_database: Engine) -> None:
+    """Operating on a non-existent approval request raises an error."""
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        with pytest.raises(ExecutionPersistenceError, match="was not found"):
+            repository.approve_approval_request(uuid4())
+        with pytest.raises(ExecutionPersistenceError, match="was not found"):
+            repository.reject_approval_request(uuid4())
+
+
+def test_database_transaction_failure_preserves_in_memory_state(
+    migrated_database: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed database transaction does not falsely update approval state."""
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        execution_id = _create_minimal_execution(session)
+        approval = repository.create_approval_request(
+            execution_id=execution_id,
+            execution_step_id=None,
+            action_description="Test approval",
+            action_digest="a" * 64,
+            safe_arguments={},
+        )
+        approval_id = approval.id
+        session.commit()
+
+        def failing_commit() -> None:
+            raise RuntimeError("controlled commit failure")
+
+        monkeypatch.setattr(session, "commit", failing_commit)
+
+        with pytest.raises(ExecutionPersistenceError):
+            repository.approve_approval_request(approval_id)
+
+    with Session(migrated_database) as session:
+        repository = ExecutionRepository(session)
+        pending = repository.get_pending_approval_requests(execution_id=execution_id)
+        assert len(pending) == 1
+        assert pending[0].status == "pending"
+        assert pending[0].reviewed_at is None
+
+
+def test_engine_persists_approval_request_through_repository(
+    migrated_database: Engine,
+) -> None:
+    """The WorkflowEngine persists approval requests via the repository."""
+    registry = _approval_tool_registry()
+    definition = WorkflowDefinition(
+        name="approval persistence test",
+        tasks=[
+            WorkflowTask(
+                task_id="research",
+                agent_type=AgentRole.ANALYST,
+                tool_request=WorkflowToolRequest(
+                    tool_id="guarded_tool",
+                    arguments={"message": "search"},
+                ),
+            )
+        ],
+    )
+
+    with Session(migrated_database) as session:
+        workflow = Workflow(
+            name=f"approval-test-{uuid4().hex}",
+            description="Approval persistence test.",
+            workflow_definition=definition.model_dump(mode="json"),
+            version=1,
+        )
+        session.add(workflow)
+        session.commit()
+
+        repository = ExecutionRepository(session)
+        engine = WorkflowEngine(
+            tool_executor=ToolExecutor(registry),
+            approval_repository=repository,
+        )
+
+        snapshot = engine.create_execution(
+            definition,
+            on_update=lambda value: repository.create_execution(
+                value,
+                workflow_id=workflow.id,
+                workflow_version=workflow.version,
+                definition=definition,
+            ),
+        )
+
+        waiting = engine.run(snapshot.execution_id, on_update=repository.synchronize_execution)
+        assert waiting.status == WorkflowStatus.WAITING_APPROVAL
+
+        pending = repository.get_pending_approval_requests(execution_id=snapshot.execution_id)
+        assert len(pending) == 1
+        assert pending[0].status == "pending"
+        assert pending[0].action_digest is not None
+        assert len(pending[0].action_digest) == 64
+
+        resumed = engine.approve(
+            snapshot.execution_id,
+            approved=True,
+            on_update=repository.synchronize_execution,
+        )
+        assert resumed.status == WorkflowStatus.COMPLETED
+
+        record = repository.get_approval_request_by_id(pending[0].id)
+        assert record is not None
+        assert record.status == "approved"
+        assert record.reviewed_at is not None
+        assert repository.get_execution(snapshot.execution_id).status == WorkflowStatus.COMPLETED
+
+        remaining = repository.get_pending_approval_requests(execution_id=snapshot.execution_id)
+        assert len(remaining) == 0
+
+
+def test_engine_does_not_authorize_when_approval_commit_fails(
+    migrated_database: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed approval transaction leaves the tool grant pending and unusable."""
+    invoked: list[bool] = []
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                tool_id="guarded_tool",
+                name="guarded_tool",
+                description="Requires approval before use.",
+                required_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+                requires_approval=True,
+                handler=lambda _payload: invoked.append(True) or {"result": "ok"},
+            )
+        ]
+    )
+    definition = WorkflowDefinition(
+        name="approval transaction failure",
+        tasks=[
+            WorkflowTask(
+                task_id="research",
+                agent_type=AgentRole.ANALYST,
+                tool_request=WorkflowToolRequest(
+                    tool_id="guarded_tool", arguments={"message": "search"}
+                ),
+            )
+        ],
+    )
+    with Session(migrated_database) as session:
+        workflow = Workflow(
+            name=f"approval-failure-{uuid4().hex}",
+            description="Approval transaction failure test.",
+            workflow_definition=definition.model_dump(mode="json"),
+            version=1,
+        )
+        session.add(workflow)
+        session.commit()
+        repository = ExecutionRepository(session)
+        engine = WorkflowEngine(
+            tool_executor=ToolExecutor(registry), approval_repository=repository
+        )
+        pending = engine.create_execution(
+            definition,
+            on_update=lambda value: repository.create_execution(
+                value,
+                workflow_id=workflow.id,
+                workflow_version=workflow.version,
+                definition=definition,
+            ),
+        )
+        waiting = engine.run(pending.execution_id, on_update=repository.synchronize_execution)
+        grant = engine._pending_approvals[(pending.execution_id, "research")]
+        assert waiting.status == WorkflowStatus.WAITING_APPROVAL
+
+        def fail_approval(_approval_id: UUID, *, commit: bool = True) -> None:
+            raise ExecutionPersistenceError("controlled transaction failure")
+
+        monkeypatch.setattr(repository, "approve_approval_request", fail_approval)
+        with pytest.raises(ExecutionPersistenceError):
+            engine.approve(pending.execution_id, approved=True)
+
+        assert grant.status == "pending"
+        assert grant.approval_id in engine._approval_registry
+        assert invoked == []
+        assert engine.get_execution(pending.execution_id).status == WorkflowStatus.WAITING_APPROVAL
+
+
+def test_approval_api_auth_binding_review_and_health(
+    migrated_database: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Approval endpoints authenticate operators and bind reviews to one execution."""
+    token = "approval-operator-token"
+    settings = Settings(_env_file=None, app_env="test", api_access_token=SecretStr(token))
+    application = create_app(settings)
+    calls: list[dict[str, object]] = []
+
+    def guarded_handler(payload: object) -> dict[str, object]:
+        calls.append(payload if isinstance(payload, dict) else {"payload": payload})
+        return {"ok": True}
+
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                tool_id="guarded_tool",
+                name="guarded_tool",
+                description="Operator-gated test action.",
+                required_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+                requires_approval=True,
+                handler=guarded_handler,
+            )
+        ]
+    )
+
+    with TestClient(application) as client:
+        engine = WorkflowEngine(tool_executor=ToolExecutor(registry), settings=settings)
+        application.state.workflow_engine = engine
+        public_health = client.get("/api/v1/health")
+
+        def start_waiting_execution() -> tuple[str, str]:
+            workflow = client.post(
+                "/api/v1/workflows",
+                json={
+                    "name": f"approval-api-{uuid4().hex}",
+                    "tasks": [
+                        {
+                            "task_id": "guarded",
+                            "agent_type": "analyst",
+                            "tool_request": {
+                                "tool_id": "guarded_tool",
+                                "arguments": {"message": "sensitive-marker"},
+                            },
+                        }
+                    ],
+                },
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert workflow.status_code == 201, workflow.text
+            execution = client.post(
+                f"/api/v1/workflows/{workflow.json()['id']}/executions",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert execution.status_code == 201, execution.text
+            execution_id = execution.json()["execution_id"]
+            started = client.post(
+                f"/api/v1/executions/{execution_id}/start",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            assert started.status_code == 200, started.text
+            assert started.json()["status"] == "waiting_approval"
+            return execution_id, started.json()["task_results"]["guarded"]["tool_result"][
+                "metadata"
+            ]["approval_grant_id"]
+
+        first_execution, first_approval = start_waiting_execution()
+        approval_url = f"/api/v1/executions/{first_execution}/approvals"
+        assert client.get(approval_url).status_code == 401
+        assert (
+            client.get(approval_url, headers={"Authorization": "Bearer wrong"}).status_code == 401
+        )
+        listing = client.get(approval_url, headers={"Authorization": f"Bearer {token}"})
+        assert listing.status_code == 200
+        assert listing.json()[0]["approval_id"] == str(UUID(first_approval))
+        assert "safe_arguments" not in listing.text
+        assert "sensitive-marker" not in listing.text
+        wrong_execution = uuid4()
+        cross_review = client.post(
+            f"/api/v1/executions/{wrong_execution}/approvals/{first_approval}/approve",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert cross_review.status_code == 404
+
+        approved = client.post(
+            f"/api/v1/executions/{first_execution}/approvals/{first_approval}/approve",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert approved.status_code == 200, approved.text
+        assert approved.json()["status"] == "completed"
+        assert len(calls) == 1
+        repeated = client.post(
+            f"/api/v1/executions/{first_execution}/approvals/{first_approval}/approve",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert repeated.status_code == 409
+
+        second_execution, second_approval = start_waiting_execution()
+        rejected = client.post(
+            f"/api/v1/executions/{second_execution}/approvals/{second_approval}/reject",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert rejected.status_code == 200, rejected.text
+        assert rejected.json()["status"] == "failed"
+        assert len(calls) == 1
+        repeated_rejection = client.post(
+            f"/api/v1/executions/{second_execution}/approvals/{second_approval}/reject",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert repeated_rejection.status_code == 409
+
+        cancelled_execution, cancelled_approval = start_waiting_execution()
+        cancelled = client.post(
+            f"/api/v1/executions/{cancelled_execution}/cancel",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert cancelled.status_code == 200, cancelled.text
+        assert cancelled.json()["status"] == "cancelled"
+        assert len(calls) == 1
+        with Session(migrated_database) as session:
+            cancelled_row = ExecutionRepository(session).get_approval_request_by_id(
+                UUID(cancelled_approval)
+            )
+            assert cancelled_row is not None
+            assert cancelled_row.status == "rejected"
+
+        failed_execution, failed_approval = start_waiting_execution()
+        with monkeypatch.context() as patch_context:
+
+            def fail_decision(_repository, _approval_id: UUID, *, commit: bool = True):
+                raise ExecutionPersistenceError("controlled API persistence failure")
+
+            patch_context.setattr(ExecutionRepository, "approve_approval_request", fail_decision)
+            failed_review = client.post(
+                f"/api/v1/executions/{failed_execution}/approvals/{failed_approval}/approve",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert failed_review.status_code == 503
+        assert len(calls) == 1
+
+        failed_execution, failed_approval = start_waiting_execution()
+        with monkeypatch.context() as patch_context:
+
+            def fail_execution_update(_repository, _snapshot) -> None:
+                raise ExecutionPersistenceError("controlled execution transaction failure")
+
+            patch_context.setattr(
+                ExecutionRepository,
+                "synchronize_execution",
+                fail_execution_update,
+            )
+            failed_review = client.post(
+                f"/api/v1/executions/{failed_execution}/approvals/{failed_approval}/approve",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert failed_review.status_code == 503
+        assert len(calls) == 1
+        with Session(migrated_database) as session:
+            repository = ExecutionRepository(session)
+            durable_approval = repository.get_approval_request_by_id(UUID(failed_approval))
+            durable_execution = repository.get_execution(UUID(failed_execution))
+            assert durable_approval is not None
+            assert durable_approval.status == "pending"
+            assert durable_execution.status == WorkflowStatus.WAITING_APPROVAL
+
+    assert public_health.status_code == 200

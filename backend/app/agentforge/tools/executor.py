@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 from collections.abc import Collection, Mapping
 from datetime import UTC, datetime
+from threading import RLock
 from time import perf_counter
 
 from agentforge.domain.agents.contracts import AgentCapability
 from agentforge.tools.contracts import (
+    ApprovalGrant,
     ToolDefinition,
     ToolExecutionError,
     ToolExecutionRequest,
@@ -31,8 +33,15 @@ class ToolExecutionFailure(RuntimeError):
 class ToolExecutor:
     """Validate permissions, arguments, and outputs before invoking registered handlers."""
 
-    def __init__(self, registry: ToolRegistry | None = None) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry | None = None,
+        *,
+        approval_registry: dict[str, ApprovalGrant] | None = None,
+    ) -> None:
         self.registry = registry or DEFAULT_TOOL_REGISTRY
+        self.approval_registry = approval_registry if approval_registry is not None else {}
+        self._approval_lock = RLock()
 
     def execute(
         self,
@@ -103,6 +112,119 @@ class ToolExecutor:
                     },
                 ),
             )
+
+        if tool.requires_approval:
+            approval_grant = execution_request.approval_grant
+            if approval_grant is None:
+                return self._result(
+                    execution_request,
+                    ToolExecutionStatus.AWAITING_APPROVAL,
+                    started_at,
+                    ToolExecutionError(
+                        code="approval_required",
+                        message=(
+                            tool.approval_description
+                            or "This tool requires operator approval before invocation."
+                        ),
+                        details={"tool_id": execution_request.tool_id, "requires_approval": True},
+                    ),
+                )
+
+            with self._approval_lock:
+                stored_grant = self.approval_registry.get(approval_grant.approval_id)
+                if stored_grant is None or stored_grant.status != "approved":
+                    return self._result(
+                        execution_request,
+                        ToolExecutionStatus.AWAITING_APPROVAL,
+                        started_at,
+                        ToolExecutionError(
+                            code="approval_required",
+                            message=(
+                                tool.approval_description
+                                or "This tool requires operator approval before invocation."
+                            ),
+                            details={
+                                "tool_id": execution_request.tool_id,
+                                "requires_approval": True,
+                                "approval_id": approval_grant.approval_id,
+                            },
+                        ),
+                    )
+
+                if stored_grant.execution_id != execution_request.execution_id:
+                    return self._result(
+                        execution_request,
+                        ToolExecutionStatus.DENIED,
+                        started_at,
+                        ToolExecutionError(
+                            code="invalid_approval_grant",
+                            message="The approval grant execution ID does not match the request.",
+                            details={
+                                "tool_id": execution_request.tool_id,
+                                "execution_id": execution_request.execution_id,
+                                "task_id": execution_request.task_id,
+                            },
+                        ),
+                    )
+
+                if stored_grant.task_id != execution_request.task_id:
+                    return self._result(
+                        execution_request,
+                        ToolExecutionStatus.DENIED,
+                        started_at,
+                        ToolExecutionError(
+                            code="invalid_approval_grant",
+                            message="The approval grant task ID does not match the request.",
+                            details={
+                                "tool_id": execution_request.tool_id,
+                                "execution_id": execution_request.execution_id,
+                                "task_id": execution_request.task_id,
+                            },
+                        ),
+                    )
+
+                if stored_grant.tool_id != execution_request.tool_id:
+                    return self._result(
+                        execution_request,
+                        ToolExecutionStatus.DENIED,
+                        started_at,
+                        ToolExecutionError(
+                            code="invalid_approval_grant",
+                            message="The approval grant tool ID does not match the request.",
+                            details={
+                                "tool_id": execution_request.tool_id,
+                                "execution_id": execution_request.execution_id,
+                                "task_id": execution_request.task_id,
+                            },
+                        ),
+                    )
+
+                expected_digest = ApprovalGrant.compute_action_digest(
+                    execution_request.execution_id or "",
+                    execution_request.task_id or "",
+                    execution_request.tool_id,
+                    execution_request.arguments,
+                )
+                if stored_grant.action_digest != expected_digest:
+                    return self._result(
+                        execution_request,
+                        ToolExecutionStatus.DENIED,
+                        started_at,
+                        ToolExecutionError(
+                            code="invalid_approval_grant",
+                            message="The approval grant action digest does not match "
+                            "the request arguments.",
+                            details={
+                                "tool_id": execution_request.tool_id,
+                                "execution_id": execution_request.execution_id,
+                                "task_id": execution_request.task_id,
+                            },
+                        ),
+                    )
+
+                stored_grant.status = "consumed"
+                stored_grant.consumed_at = datetime.now(UTC)
+                self.approval_registry.pop(approval_grant.approval_id, None)
 
         try:
             validated_input = ToolInput.model_validate({"arguments": execution_request.arguments})
