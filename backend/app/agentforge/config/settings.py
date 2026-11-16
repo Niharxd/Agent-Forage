@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 class Settings(BaseSettings):
     """Settings shared by the API application."""
 
-    app_env: str = "development"
+    app_env: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
     cors_origins: list[str] = Field(default_factory=list)
     provider_mode: Literal["mock", "openai"] = "mock"
@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     openai_model: str = Field(default="gpt-4o-mini", min_length=1, max_length=100)
     openai_timeout_seconds: float = Field(default=30, gt=0, le=60)
     api_access_token: SecretStr | None = None
+    session_signing_secret: SecretStr | None = None
+    operator_session_ttl_seconds: int = Field(default=1800, ge=300, le=86400)
     database_url: str = "postgresql+psycopg://localhost/agentforge"
     test_database_url: str = "postgresql+psycopg://localhost/agentforge_test"
     workflow_max_tasks: int = Field(default=25, ge=1, le=25)
@@ -47,6 +49,30 @@ class Settings(BaseSettings):
             self.api_access_token is None or not self.api_access_token.get_secret_value().strip()
         ):
             raise ValueError("API_ACCESS_TOKEN is required when PROVIDER_MODE is openai")
+        if (
+            self.session_signing_secret is not None
+            and len(self.session_signing_secret.get_secret_value()) < 32
+        ):
+            raise ValueError("SESSION_SIGNING_SECRET must contain at least 32 characters")
+        if (
+            self.session_signing_secret is not None
+            and self.api_access_token is not None
+            and self.session_signing_secret.get_secret_value()
+            == self.api_access_token.get_secret_value()
+        ):
+            raise ValueError("SESSION_SIGNING_SECRET must be separate from API_ACCESS_TOKEN")
+        if self.app_env.casefold() == "production":
+            if (
+                self.api_access_token is None
+                or not self.api_access_token.get_secret_value().strip()
+            ):
+                raise ValueError("API_ACCESS_TOKEN is required in production")
+            if self.session_signing_secret is None:
+                raise ValueError("SESSION_SIGNING_SECRET is required in production")
+            if not self.cors_origins:
+                raise ValueError(
+                    "CORS_ORIGINS must contain the deployed frontend origin in production"
+                )
         return self
 
     @field_validator("log_level")
@@ -62,6 +88,8 @@ class Settings(BaseSettings):
     def validate_cors_origins(cls, origins: list[str]) -> list[str]:
         normalized_origins = []
         for origin in origins:
+            if origin == "*":
+                raise ValueError("CORS_ORIGINS cannot contain a wildcard")
             parsed = urlsplit(origin)
             if (
                 parsed.scheme not in {"http", "https"}

@@ -1236,6 +1236,7 @@ class WorkflowEngine:
                     execution_id=execution.execution_id,
                     task_id=task.task_id,
                 ),
+                tool_id=task.tool_request.tool_id if task.tool_request is not None else None,
                 action_description=action_description,
                 action_digest=grant.action_digest,
                 safe_arguments={},

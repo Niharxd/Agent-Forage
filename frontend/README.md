@@ -45,13 +45,25 @@ The frontend calls the same-origin `/api/v1` routes. Vite proxies `/api` to
 workflow and execution APIs for workflow preparation, workflow listing,
 execution history, details, start, cancellation, and approval visibility.
 
-The backend protects approval listing and review with its shared operator
-bearer token. There is no secure browser session or server-side token proxy in
-the current architecture, so the frontend does not embed or store that token.
-Approval review remains unavailable from the browser until a server-side
-authentication boundary is provided; protected approval reads show the API's
-safe error. Do not add the token to `VITE_*` variables because those values are
-bundled into browser code.
+The application restores its authenticated state through
+`GET /api/v1/auth/session`. Operators submit the shared credential to
+`POST /api/v1/auth/session`; the API verifies it and returns an HttpOnly,
+SameSite=Strict session cookie. The input is cleared after submission and the
+credential is never stored in browser storage or frontend configuration.
+`DELETE /api/v1/auth/session` revokes the process-local session. In OpenAI
+mode and production, the cookie authenticates workflow, execution, and approval
+requests. Cookie-authenticated state-changing requests require an exact
+configured `Origin`. The frontend asks for confirmation and waits for the API
+response before reporting a decision, then reloads approvals and execution
+details. Approval summaries contain only safe descriptions and identifiers.
+
+The API and UI must share a browser origin in deployment; route `/api` through
+a reverse proxy to FastAPI. Set `CORS_ORIGINS` to that exact UI origin.
+Production requires HTTPS and sets
+the cookie `Secure` flag. The backend still accepts its existing bearer token
+for protected API use. Session revocation is process-local, so use a single API
+process; a restart expires all sessions. Do not add the token to `VITE_*`
+variables because those values are bundled into browser code.
 
 The official `AgentForge Gradient Circuit Logo.png` is stored at
 `public/assets/agentforge-logo.png` and used in the sidebar with contained

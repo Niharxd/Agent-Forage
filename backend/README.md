@@ -26,9 +26,29 @@ refuses any test URL that is not local, does not target `agentforge_test`, or
 matches the application URL. `APP_ENV=test` selects `TEST_DATABASE_URL` for
 the application and migration commands.
 
-Authentication has not been specified for this single-operator MVP, so the
-`users` table intentionally has no password field. Do not expose this service
-to an untrusted network without an approved authentication mechanism.
+The shared operator credential is configured as `API_ACCESS_TOKEN`; a separate
+`SESSION_SIGNING_SECRET` (at least 32 characters) signs short-lived browser
+sessions. Set `OPERATOR_SESSION_TTL_SECONDS` between 300 and 86400 seconds
+(default 1800). The token is submitted only to `POST /api/v1/auth/session` and
+is never stored by the browser. The server issues an HttpOnly, SameSite=Strict
+cookie. Production requires both secrets, explicit `CORS_ORIGINS`, HTTPS, and
+the UI and API routed through the same browser origin (for example, a reverse
+proxy that forwards `/api` to FastAPI). State-changing cookie-authenticated
+requests require an exact configured `Origin`; CORS credentials are enabled
+only for those explicit origins. The legacy bearer token remains supported on
+protected workflow, execution, and approval endpoints. Browser sessions
+authenticate those same protected workflow and execution APIs. Production
+protects workflow and execution APIs in both `mock` and `openai` provider
+modes. Local development with `APP_ENV=development` and
+`PROVIDER_MODE=mock` remains unauthenticated.
+
+Sessions are held in process memory so logout revokes the active session. A
+process restart logs out all operators. Run one API process only; multiple
+workers or replicas do not share session revocations. This shared-credential
+scheme has no individual identities, MFA, or per-operator audit attribution
+and is not a public-internet or multi-tenant identity system. Local development
+uses the Vite `/api` proxy, so configure `CORS_ORIGINS=["http://localhost:5173"]`
+and set both local secrets. Never use a browser-visible `VITE_*` secret.
 
 ## Start the local database
 
@@ -118,6 +138,12 @@ SQLAlchemy models and raw exception messages are not returned.
 | `GET` | `/executions?limit=50&offset=0` | List persisted executions with database-backed pagination; optional `status` and case-insensitive `search` filters match workflow names or execution IDs. |
 | `GET` | `/executions/{execution_id}` | Reconstruct execution status, lifecycle events, task-level results, and execution order from PostgreSQL. |
 | `POST` | `/executions/{execution_id}/cancel` | Cancel pending work or request cooperative cancellation while running. |
+| `POST` | `/auth/session` | Verify the shared operator credential and issue an HttpOnly browser session cookie. |
+| `GET` | `/auth/session` | Check whether the browser session is still valid. |
+| `DELETE` | `/auth/session` | Revoke the current process-local session and clear its cookie. |
+| `GET` | `/executions/{execution_id}/approvals` | List safe approval summaries; accepts the legacy bearer token or a browser session. |
+| `POST` | `/executions/{execution_id}/approvals/{approval_id}/approve` | Approve and resume a pending action; cookie sessions require an allowed Origin. |
+| `POST` | `/executions/{execution_id}/approvals/{approval_id}/reject` | Reject a pending action; cookie sessions require an allowed Origin. |
 
 Workflow definitions are stored in the existing PostgreSQL `workflows` table.
 Creating another definition with the same name creates its next version under
@@ -185,14 +211,11 @@ per-execution sequence to audit events. Existing tables are reused.
 Invalid request/schema input returns `422`; missing workflow or execution IDs
 return `404`; invalid execution transitions return `409`; request bodies above
 1 MiB return `413`. Error responses use stable codes and omit raw Python
-exception messages. The API adds no authentication or authorization layer;
-keep the service on a trusted local interface.
-
-Invalid request/schema input returns `422`; missing workflow or execution IDs
-return `404`; invalid execution transitions return `409`; request bodies above
-1 MiB return `413`. Error responses use stable codes and omit raw Python
-exception messages. The API adds no authentication or authorization layer;
-keep the service on a trusted local interface.
+exception messages. OpenAI mode protects workflow and execution routers with
+bearer or browser-session authentication. Production enforces authentication
+for those routers regardless of provider mode. Keep the service on a trusted
+interface and use the Day 20 deployment requirements above before exposing it
+beyond local use.
 
 ## Run the API
 

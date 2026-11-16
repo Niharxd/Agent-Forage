@@ -119,6 +119,7 @@ class ExecutionApprovalResponse(BaseModel):
     approval_id: UUID
     execution_id: UUID
     task_id: str | None = None
+    tool_id: str | None = None
     action_description: str
     status: str
     requested_at: datetime

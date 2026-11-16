@@ -2,6 +2,29 @@
 
 ## System boundaries
 
+### Day 20 operator sessions
+
+The API retains the shared `API_ACCESS_TOKEN` bearer mechanism and exposes a
+separate browser session boundary for protected workflow, execution, and
+approval operations. The
+login endpoint compares the submitted credential in constant time, then issues
+a signed, expiring HttpOnly cookie using the independent
+`SESSION_SIGNING_SECRET`. The cookie is scoped to `/api/v1`, uses
+`SameSite=Strict`, and is Secure in production. Session IDs are registered in
+process memory to support logout revocation. Restart clears all sessions;
+multiple API processes do not share session state and are not supported by this
+interim mechanism.
+
+Cookie sessions are accepted by protected workflow and execution routers and
+the approval listing/review endpoints. Every cookie-authenticated
+state-changing request, login, and logout requires an exact configured Origin.
+CORS uses explicit origins with credentials and rejects wildcard origins.
+Production protects workflow and execution routes in both provider modes and
+requires HTTPS and same-origin UI/API routing (the existing frontend uses
+relative `/api` paths). The dashboard never
+receives or stores the shared bearer credential. This is one shared operator
+identity, not per-person attribution, MFA, or RBAC.
+
 AgentForge separates planning, workflow policy, execution, and provider/tool integrations. Agents are role-specific prompts/adapters invoked by the engine; they are not independent processes with authority to select arbitrary capabilities.
 
 ```mermaid

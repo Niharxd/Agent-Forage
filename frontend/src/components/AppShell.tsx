@@ -3,7 +3,7 @@ import { Outlet, useLocation } from "react-router-dom";
 import { Header } from "./Header";
 import { Sidebar } from "./Sidebar";
 
-export function AppShell() {
+export function AppShell({ onLogout, logoutError }: { onLogout: () => void; logoutError: string | null }) {
   const location = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -21,7 +21,7 @@ export function AppShell() {
           onToggleMobile={handleMobileClose}
         />
         <div className="flex min-h-screen flex-1 flex-col">
-          <Header onMenuClick={handleMenuClick} />
+          <Header onMenuClick={handleMenuClick} onLogout={onLogout} logoutError={logoutError} />
           <main className="flex-1 p-4 md:p-6" aria-label="Main content">
             <Outlet context={{ currentPath: location.pathname }} />
           </main>

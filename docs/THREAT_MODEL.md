@@ -16,6 +16,26 @@ This model covers task submission, LLM-based planning and role execution, tool p
 
 ## Trust boundaries and assumptions
 
+### Day 20 browser session boundary
+
+The shared operator token is checked only by the backend and is not retained in
+browser storage. A separately configured signing secret protects short-lived
+session cookies. The cookie is HttpOnly, path-scoped, SameSite=Strict, and
+Secure in production. The backend tracks active session IDs in process memory
+for logout revocation; restarting the process revokes all sessions. This does
+not support multiple API workers or replicas. Login, logout, and cookie-based
+approval decisions require an exact configured Origin; approval reads are
+safe GETs. Credentialed CORS is limited to the configured explicit origin
+list, and production requires HTTPS and same-origin UI/API routing.
+
+This interim single shared credential cannot identify which human operator
+acted, provide MFA, rate-limit login attempts, or revoke sessions across
+processes. Protect the service network boundary and secrets accordingly. The
+existing bearer token remains accepted by protected APIs; browser sessions
+authenticate protected workflow and execution routes and approval routes when
+router authentication is enabled (OpenAI mode or any production deployment).
+Development mock mode deliberately keeps those routers unauthenticated.
+
 - User input, model output, tool output, and content retrieved by tools are untrusted.
 - Provider responses may be malformed, adversarially influenced, incomplete, or false.
 - The operator is trusted to configure the service and approve displayed actions; the MVP does not provide multi-party approval.
@@ -35,7 +55,7 @@ This model covers task submission, LLM-based planning and role execution, tool p
 | Ambiguous timeout/retry duplicates a side effect | Duplicate external operation | Retry only classified transient failures; require idempotency contract/key for side-effect retry; otherwise mark outcome ambiguous and request operator recovery. |
 | Credential leakage in prompt, logs, API, or database | Account compromise | Environment/secret-store configuration; never put secrets in prompts or user-visible results; structured redaction; avoid logging headers/credential-bearing arguments; test redaction. |
 | Cross-site scripting through task/plan/tool output | Operator session compromise | Render untrusted values as text; sanitize any explicitly supported rich text; use standard React escaping and a restrictive Content Security Policy in deployed UI. |
-| API abuse or unauthorized approval | Workflow manipulation or data exposure | Restrict network exposure; implement the agreed authentication before non-local use; authorize every state-changing endpoint; rate/size limits; audit actor. |
+| API abuse or unauthorized approval | Workflow manipulation or data exposure | Exact-origin CSRF checks for cookie decisions, signed expiring session, existing bearer auth, restrict network exposure; rate/size limits; audit actor attribution remains shared. |
 | Database tampering or deletion | False history, lost work, unauthorized disclosure | Least-privilege DB account; network isolation; backups and restore tests; append-only audit discipline at application level; encryption/retention policy determined for deployment. |
 | Resource exhaustion via large tasks, plans, loops, or slow provider calls | Service degradation/cost escalation | 10,000-character task limit, plan/step limits, one tool request per step, timeouts, retry/active-duration caps, provider budgets/rate limits, and a single worker in the MVP. |
 | Worker crash/replay during external action | Concurrent or duplicated side effects; misleading status | Durable execution claim, failed state with recovery-required reason for ambiguity, idempotency rules, transactionally persisted transitions; do not claim exactly-once effects. |

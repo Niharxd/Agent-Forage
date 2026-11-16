@@ -1,6 +1,6 @@
 import { AlertTriangle, CheckCircle2, RefreshCw, Search } from "lucide-react";
 import { useEffect, useState } from "react";
-import { cancelExecution, getExecution, listApprovals, listExecutions, startExecution, type Approval, type Execution, type ExecutionStatus } from "../api/executions";
+import { cancelExecution, getExecution, listApprovals, listExecutions, reviewApproval, startExecution, type Approval, type Execution, type ExecutionStatus } from "../api/executions";
 import { Button } from "../components/Button";
 import { EmptyState } from "../components/EmptyState";
 import { LoadingState } from "../components/LoadingState";
@@ -70,11 +70,26 @@ function ExecutionDetails({ execution, onChanged }: { execution: Execution; onCh
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [acting, setActing] = useState(false);
+  const [approvalReload, setApprovalReload] = useState(0);
+  const [reviewedMessage, setReviewedMessage] = useState<string | null>(null);
   useEffect(() => {
     const controller = new AbortController();
     listApprovals(execution.execution_id, controller.signal).then((items) => { if (!controller.signal.aborted) { if (Array.isArray(items)) setApprovals(items); else setApprovalError("The server returned an invalid approval response."); } }).catch((error: unknown) => { if (!controller.signal.aborted) setApprovalError(error instanceof Error ? error.message : "Approval status is unavailable."); });
     return () => controller.abort();
-  }, [execution.execution_id]);
+  }, [execution.execution_id, approvalReload]);
+  async function decide(approval: Approval, decision: "approve" | "reject") {
+    if (acting || approval.status !== "pending") return;
+    const prompt = decision === "approve" ? "Approve this action and allow the execution to resume?" : "Reject this action and fail the waiting task?";
+    if (!window.confirm(prompt)) return;
+    setActing(true); setActionError(null); setReviewedMessage(null);
+    try {
+      await reviewApproval(execution.execution_id, approval.approval_id, decision);
+      setReviewedMessage(decision === "approve" ? "Approval recorded." : "Rejection recorded.");
+      setApprovalReload((value) => value + 1);
+      onChanged();
+    } catch (error) { setActionError(error instanceof Error ? error.message : "Approval decision failed."); }
+    finally { setActing(false); }
+  }
   async function runAction(action: "start" | "cancel") {
     if (acting) return;
     setActing(true); setActionError(null);
@@ -108,9 +123,11 @@ function ExecutionDetails({ execution, onChanged }: { execution: Execution; onCh
 
       <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-alt)] p-4">
         <div className="mb-3 flex items-center gap-2"><AlertTriangle size={15} className="text-amber-300"/><h3 className="text-sm font-semibold">Approvals</h3><span className="ml-auto rounded-full border border-[var(--border)] px-2 py-0.5 text-[10px] text-[var(--muted)]">{approvals.filter((item) => item.status === "pending").length} pending</span></div>
-        {approvals.map((approval) => <div key={approval.approval_id} className="border-t border-[var(--border)] py-3 first:border-0"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm text-[var(--text)]">{approval.action_description}</p><StatusBadge tone={approval.status === "pending" ? "blue" : approval.status === "approved" ? "green" : "neutral"}>{approval.status}</StatusBadge></div><p className="mt-1 text-xs text-[var(--secondary)]">Task {approval.task_id ?? "unassigned"} · Requested {formatTimestamp(approval.requested_at)}{approval.reviewed_at ? ` · Reviewed ${formatTimestamp(approval.reviewed_at)}` : ""}</p></div>)}
+        {approvals.map((approval) => <div key={approval.approval_id} className="border-t border-[var(--border)] py-3 first:border-0"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm text-[var(--text)]">{approval.action_description}</p><StatusBadge tone={approval.status === "pending" ? "blue" : approval.status === "approved" ? "green" : "neutral"}>{approval.status}</StatusBadge></div><p className="mt-1 break-all text-[10px] text-[var(--muted)]">Approval {approval.approval_id} · Execution {approval.execution_id} · Tool {approval.tool_id ?? "unavailable"}</p><p className="mt-1 text-xs text-[var(--secondary)]">Task {approval.task_id ?? "unassigned"} · Requested {formatTimestamp(approval.requested_at)}{approval.reviewed_at ? ` · Reviewed ${formatTimestamp(approval.reviewed_at)}` : ""}</p>{approval.status === "pending" && <div className="mt-3 flex gap-2"><Button onClick={() => void decide(approval, "approve")} disabled={acting}>{acting ? "Saving…" : "Approve"}</Button><Button variant="secondary" onClick={() => void decide(approval, "reject")} disabled={acting}>{acting ? "Saving…" : "Reject"}</Button></div>}</div>)}
+        {actionError && <p role="alert" className="mt-2 text-xs text-[var(--error)]">{actionError}</p>}
+        {reviewedMessage && <p role="status" className="mt-2 text-xs text-[var(--success)]">{reviewedMessage}</p>}
         {!approvals.length && !approvalError && <p className="text-xs text-[var(--muted)]"><CheckCircle2 className="mr-1 inline" size={13}/>No approval requests for this execution.</p>}
-        {approvalError && <p role="status" className="text-xs text-[var(--muted)]">Approval list unavailable: {approvalError} Approval review requires the configured operator bearer token.</p>}
+        {approvalError && <p role="status" className="text-xs text-[var(--muted)]">Approval list unavailable: {approvalError}</p>}
       </div>
 
       {execution.workflow_plan ? (

@@ -1033,6 +1033,7 @@ def test_approval_request_is_persisted_as_pending(migrated_database: Engine) -> 
         approval = repository.create_approval_request(
             execution_id=execution_id,
             execution_step_id=None,
+            tool_id="guarded_tool",
             action_description="Approve executing tool guarded_tool for task task-1.",
             action_digest="a" * 64,
             safe_arguments={"message": "test"},
@@ -1041,6 +1042,7 @@ def test_approval_request_is_persisted_as_pending(migrated_database: Engine) -> 
 
     assert approval.id is not None
     assert approval.execution_id == execution_id
+    assert approval.tool_id == "guarded_tool"
     assert approval.status == "pending"
     assert approval.reviewed_at is None
     assert approval.requested_at is not None
@@ -1517,3 +1519,117 @@ def test_approval_api_auth_binding_review_and_health(
             assert durable_execution.status == WorkflowStatus.WAITING_APPROVAL
 
     assert public_health.status_code == 200
+
+
+def test_openai_browser_session_authenticates_workflow_execution_and_approvals(
+    migrated_database: Engine,
+) -> None:
+    """A browser session protects the full OpenAI-mode operator workflow."""
+    origin = "http://localhost:5173"
+    token = "browser-flow-operator-token"
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        provider_mode="openai",
+        openai_api_key=SecretStr("provider-key-for-test"),
+        api_access_token=SecretStr(token),
+        session_signing_secret=SecretStr("b" * 40),
+        cors_origins=[origin],
+    )
+    application = create_app(settings)
+    calls: list[object] = []
+
+    def guarded_handler(payload: object) -> dict[str, bool]:
+        calls.append(payload)
+        return {"ok": True}
+
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                tool_id="browser_guarded_tool",
+                name="browser_guarded_tool",
+                description="Requires operator approval.",
+                required_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+                requires_approval=True,
+                handler=guarded_handler,
+            )
+        ]
+    )
+    with TestClient(application) as client:
+        application.state.workflow_engine = WorkflowEngine(
+            tool_executor=ToolExecutor(registry), settings=settings
+        )
+        assert client.get("/api/v1/workflows").status_code == 401
+        assert client.get("/api/v1/executions").status_code == 401
+
+        login = client.post(
+            "/api/v1/auth/session",
+            json={"credential": token},
+            headers={"Origin": origin},
+        )
+        assert login.status_code == 200, login.text
+        assert client.get("/api/v1/auth/session").json() == {"authenticated": True}
+
+        workflow = client.post(
+            "/api/v1/workflows",
+            json={
+                "name": f"browser-session-{uuid4().hex}",
+                "tasks": [
+                    {
+                        "task_id": "guarded",
+                        "agent_type": "analyst",
+                        "tool_request": {
+                            "tool_id": "browser_guarded_tool",
+                            "arguments": {"message": "private-action-argument"},
+                        },
+                    }
+                ],
+            },
+            headers={"Origin": origin},
+        )
+        assert workflow.status_code == 201, workflow.text
+        workflow_id = workflow.json()["id"]
+        fetched_workflow = client.get(f"/api/v1/workflows/{workflow_id}")
+        assert fetched_workflow.status_code == 200, fetched_workflow.text
+        execution = client.post(
+            f"/api/v1/workflows/{workflow_id}/executions", headers={"Origin": origin}
+        )
+        assert execution.status_code == 201, execution.text
+        execution_id = execution.json()["execution_id"]
+        fetched_execution = client.get(f"/api/v1/executions/{execution_id}")
+        assert fetched_execution.status_code == 200, fetched_execution.text
+        started = client.post(
+            f"/api/v1/executions/{execution_id}/start", headers={"Origin": origin}
+        )
+        assert started.status_code == 200, started.text
+        assert started.json()["status"] == "waiting_approval"
+
+        approvals_url = f"/api/v1/executions/{execution_id}/approvals"
+        approvals = client.get(approvals_url)
+        assert approvals.status_code == 200, approvals.text
+        approval = approvals.json()[0]
+        assert approval["status"] == "pending"
+        assert "private-action-argument" not in approvals.text
+        assert "arguments" not in approval
+
+        wrong_origin = client.post(
+            f"{approvals_url}/{approval['approval_id']}/approve",
+            headers={"Origin": "https://attacker.example"},
+        )
+        assert wrong_origin.status_code == 403
+        approved = client.post(
+            f"{approvals_url}/{approval['approval_id']}/approve",
+            headers={"Origin": origin},
+        )
+        assert approved.status_code == 200, approved.text
+        assert approved.json()["status"] == "completed"
+        assert len(calls) == 1
+        refreshed = client.get(approvals_url)
+        assert refreshed.status_code == 200
+        assert refreshed.json()[0]["status"] == "approved"
+
+        logout = client.delete("/api/v1/auth/session", headers={"Origin": origin})
+        assert logout.status_code == 204
+        assert client.get("/api/v1/workflows").status_code == 401
+        assert client.get("/api/v1/executions").status_code == 401
+        assert client.get(approvals_url).status_code == 401

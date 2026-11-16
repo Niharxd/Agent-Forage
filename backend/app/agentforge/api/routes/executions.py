@@ -6,7 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from agentforge.api.auth import require_api_access_token
+from agentforge.api.auth import require_approval_operator
 from agentforge.api.dependencies import get_workflow_engine, get_workflow_orchestrator
 from agentforge.api.responses import execution_response
 from agentforge.api.schemas import (
@@ -103,7 +103,7 @@ def start_execution(
 def list_execution_approvals(
     execution_id: UUID,
     session: Annotated[Session, Depends(get_db_session)],
-    _operator: Annotated[None, Depends(require_api_access_token)],
+    _operator: Annotated[None, Depends(require_approval_operator)],
 ) -> list[ExecutionApprovalResponse]:
     """List approval status and safe action descriptions for one execution."""
     repository = ExecutionRepository(session)
@@ -116,6 +116,7 @@ def list_execution_approvals(
             approval_id=row.id,
             execution_id=row.execution_id,
             task_id=row.execution_step.task_id if row.execution_step else None,
+            tool_id=row.tool_id,
             action_description=row.action_description,
             status=row.status,
             requested_at=row.requested_at,
@@ -165,7 +166,7 @@ def approve_execution_approval(
     approval_id: UUID,
     session: Annotated[Session, Depends(get_db_session)],
     engine: Annotated[WorkflowEngine, Depends(get_workflow_engine)],
-    _operator: Annotated[None, Depends(require_api_access_token)],
+    _operator: Annotated[None, Depends(require_approval_operator)],
 ) -> ExecutionResponse:
     """Approve a persisted pending action and resume its execution."""
     return _review_approval(execution_id, approval_id, True, session, engine)
@@ -179,7 +180,7 @@ def reject_execution_approval(
     approval_id: UUID,
     session: Annotated[Session, Depends(get_db_session)],
     engine: Annotated[WorkflowEngine, Depends(get_workflow_engine)],
-    _operator: Annotated[None, Depends(require_api_access_token)],
+    _operator: Annotated[None, Depends(require_approval_operator)],
 ) -> ExecutionResponse:
     """Reject a persisted pending action and fail the waiting task safely."""
     return _review_approval(execution_id, approval_id, False, session, engine)

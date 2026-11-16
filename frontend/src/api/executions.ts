@@ -77,6 +77,7 @@ export type Approval = {
   approval_id: string;
   execution_id: string;
   task_id: string | null;
+  tool_id: string | null;
   action_description: string;
   status: string;
   requested_at: string;
@@ -87,13 +88,19 @@ export type PrepareResponse = { workflow: WorkflowRecord; execution: Execution }
 
 async function request<T>(path: string, signal?: AbortSignal, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
+    credentials: "include",
     headers: { Accept: "application/json", ...(init?.body ? { "Content-Type": "application/json" } : {}), ...init?.headers },
     signal,
     ...init,
   });
 
   if (!response.ok) {
-    if (response.status === 401) throw new Error("Operator authentication is required for this action.");
+    if (response.status === 401) {
+      if (!signal?.aborted && typeof window !== "undefined") {
+        window.dispatchEvent(new Event("agentforge:session-expired"));
+      }
+      throw new Error("Your operator session expired. Sign in again to continue.");
+    }
     if (response.status === 503) throw new Error("The API is temporarily unavailable or operator authentication is not configured.");
     let detail = "";
     try { const body = await response.json() as { detail?: unknown }; detail = typeof body.detail === "string" ? body.detail : ""; } catch { /* response may not contain JSON */ }
@@ -120,6 +127,10 @@ export function listWorkflows(signal?: AbortSignal): Promise<{ items: WorkflowRe
 
 export function listApprovals(executionId: string, signal?: AbortSignal): Promise<Approval[]> {
   return request(`/executions/${encodeURIComponent(executionId)}/approvals`, signal);
+}
+
+export function reviewApproval(executionId: string, approvalId: string, decision: "approve" | "reject"): Promise<Execution> {
+  return request(`/executions/${encodeURIComponent(executionId)}/approvals/${encodeURIComponent(approvalId)}/${decision}`, undefined, { method: "POST" });
 }
 
 export function startExecution(executionId: string): Promise<Execution> {

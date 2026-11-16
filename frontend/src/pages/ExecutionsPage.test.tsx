@@ -79,6 +79,54 @@ describe("ExecutionsPage", () => {
   afterEach(() => {
     cleanup();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("confirms an approval, prevents duplicate submissions, and refreshes details", async () => {
+    const approvalId = "a10f8341-d8d1-45f1-bade-a01234567890";
+    const reviewResponse = deferred<Response>();
+    let status = "pending";
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.includes("/executions?") && init?.method !== "POST") {
+        return Promise.resolve(jsonResponse(executionList([executionRecord()])));
+      }
+      if (url.endsWith(`/executions/${executionId}/approvals`)) {
+        return Promise.resolve(jsonResponse([{
+          approval_id: approvalId,
+          execution_id: executionId,
+          task_id: "analyze",
+          tool_id: "calculator",
+          action_description: "Approve the calculator action.",
+          status,
+          requested_at: "2026-11-10T09:00:02Z",
+          reviewed_at: status === "pending" ? null : "2026-11-10T09:01:00Z",
+        }]));
+      }
+      if (url.endsWith(`/executions/${executionId}/approvals/${approvalId}/approve`)) {
+        return reviewResponse.promise;
+      }
+      if (url.endsWith(`/executions/${executionId}`)) return Promise.resolve(jsonResponse(executionRecord()));
+      return Promise.resolve(jsonResponse(executionList([executionRecord()])));
+    });
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<ExecutionsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: `View execution ${executionId}` }));
+    expect(await screen.findByText(/Tool calculator/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1));
+    expect(window.confirm).toHaveBeenCalledWith("Approve this action and allow the execution to resume?");
+    const approveButton = screen.getAllByRole("button", { name: "Saving…" })[0];
+    expect(approveButton).toBeDisabled();
+    fireEvent.click(screen.getAllByRole("button", { name: "Saving…" })[0]);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    status = "approved";
+    reviewResponse.resolve(jsonResponse(executionRecord()));
+    expect(await screen.findByText("approved")).toBeInTheDocument();
+    expect(await screen.findByText("Approval recorded.")).toBeInTheDocument();
+    const reviewCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith(`/approvals/${approvalId}/approve`));
+    expect(reviewCall?.[1]?.credentials).toBe("include");
   });
 
   it("loads persisted executions and requests the next page", async () => {

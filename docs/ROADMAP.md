@@ -65,6 +65,20 @@ cohesive AgentForge interface, and expose safe execution and approval status.
 The frontend continues to require explicit operator start actions; it does not
 change backend authorization or execution policy.
 
+## Day 20 — browser operator sessions and approval review
+
+Added server-side verification of the shared operator credential, a separate
+signed expiring HttpOnly session cookie, explicit-origin CSRF checks, and
+credentialed CORS limited to configured origins. The React app now restores and
+ends a browser session without retaining the shared token, and execution
+details can confirm and submit approval or rejection decisions through the
+existing approval API. The interim session registry is process-local: a restart
+revokes sessions, and multiple API workers/replicas are unsupported. Production
+requires explicit secrets, HTTPS, and same-origin UI/API routing. This
+milestone is not a claim of production readiness; multi-process session
+revocation, per-operator identity, MFA, login rate limiting, and deployment
+verification remain open.
+
 ## Milestones
 
 ### M0 — Specification and repository baseline

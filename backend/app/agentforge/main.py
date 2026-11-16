@@ -3,6 +3,7 @@
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from threading import RLock
 
 from fastapi import Depends, FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -16,6 +17,7 @@ from agentforge.api.errors import (
     validation_exception_handler,
 )
 from agentforge.api.middleware import RequestSizeLimitMiddleware
+from agentforge.api.routes.auth import router as auth_router
 from agentforge.api.routes.executions import router as executions_router
 from agentforge.api.routes.health import router as health_router
 from agentforge.api.routes.workflows import router as workflows_router
@@ -54,6 +56,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     application.state.settings = app_settings
+    application.state.active_sessions = {}
+    application.state.session_lock = RLock()
     application.add_middleware(
         RequestSizeLimitMiddleware,
         max_bytes=1_048_576,
@@ -61,16 +65,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.add_middleware(
         CORSMiddleware,
         allow_origins=app_settings.cors_origins,
-        allow_credentials=False,
-        allow_methods=["GET", "POST"],
-        allow_headers=["*"],
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
     )
     application.add_exception_handler(StarletteHTTPException, http_exception_handler)
     application.add_exception_handler(RequestValidationError, validation_exception_handler)
     application.add_exception_handler(Exception, unhandled_exception_handler)
     application.include_router(health_router, prefix="/api/v1")
+    application.include_router(auth_router, prefix="/api/v1")
+    # Keep local mock mode frictionless; production and OpenAI modes always
+    # require server-side authentication on workflow and execution routes.
     protected_router_dependencies = (
-        [Depends(require_api_access_token)] if app_settings.provider_mode == "openai" else []
+        [Depends(require_api_access_token)]
+        if app_settings.app_env == "production" or app_settings.provider_mode == "openai"
+        else []
     )
     application.include_router(
         workflows_router,

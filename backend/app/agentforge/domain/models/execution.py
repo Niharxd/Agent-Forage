@@ -180,6 +180,7 @@ class ApprovalRequest(Base):
         ForeignKey("execution_steps.id", ondelete="SET NULL"),
         index=True,
     )
+    tool_id: Mapped[str | None] = mapped_column(String(100))
     action_description: Mapped[str] = mapped_column(Text, nullable=False)
     action_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     safe_arguments: Mapped[dict[str, Any]] = mapped_column(
