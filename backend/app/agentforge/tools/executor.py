@@ -242,6 +242,23 @@ class ToolExecutor:
 
         try:
             output = tool.handler(validated_input.arguments)
+        except Exception:
+            # The handler was invoked, so it may have completed an external
+            # side effect before failing. Do not report a retry-safe failure.
+            return self._result(
+                execution_request,
+                ToolExecutionStatus.AMBIGUOUS,
+                started_at,
+                ToolExecutionError(
+                    code="tool_outcome_ambiguous",
+                    message=(
+                        "The tool failed after invocation; its side-effect outcome "
+                        "could not be confirmed."
+                    ),
+                ),
+            )
+
+        try:
             if output is None:
                 raise ValueError("The tool did not return output.")
             validated_output = ToolOutput.model_validate(output)
@@ -265,11 +282,14 @@ class ToolExecutor:
             if isinstance(exc, TimeoutError):
                 return self._result(
                     execution_request,
-                    ToolExecutionStatus.FAILED,
+                    ToolExecutionStatus.AMBIGUOUS,
                     started_at,
                     ToolExecutionError(
-                        code="execution_timeout",
-                        message="The tool exceeded the configured execution limit.",
+                        code="tool_outcome_ambiguous",
+                        message=(
+                            "The tool exceeded its execution limit; its side-effect "
+                            "outcome could not be confirmed."
+                        ),
                         details={
                             "limit_ms": self._execution_timeout_ms(tool),
                             "actual_ms": max(0, round((perf_counter() - started_at) * 1000)),

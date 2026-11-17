@@ -89,7 +89,7 @@ stateDiagram-v2
     cancelled --> [*]
 ```
 
-State transitions are validated centrally by `WorkflowEngine`. The persistence adapter does not duplicate transition rules; each accepted engine snapshot and its newly appended events are committed together. A transition record includes execution, prior/new state, timestamp, system source, and a safe reason. The current engine does not retry tasks.
+State transitions are validated centrally by `WorkflowEngine`. The persistence adapter does not duplicate transition rules; each accepted engine snapshot and its newly appended events are committed together. A transition record includes execution, prior/new state, timestamp, system source, and a safe reason. The current engine does not retry tasks. If a registered tool raises unexpectedly after invocation or exceeds its measured duration budget, the tool result is `ambiguous` because an external side effect may already have occurred. The workflow fails, raw exception text is omitted, and no automatic retry occurs. Synchronous handlers cannot be forcibly interrupted; duration limits are checked after they return.
 
 **Restart behavior:** execution records, steps, results, timestamps, and ordered events survive API restarts and can be retrieved/listed from PostgreSQL. The in-memory engine does not rehydrate active executions, so a pending or interrupted execution cannot be started or resumed after restart; no recovery worker or durable claim is implemented. Exactly-once external effects are not promised.
 

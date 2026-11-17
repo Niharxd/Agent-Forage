@@ -592,10 +592,42 @@ def test_executor_does_not_expose_raw_handler_exception_text() -> None:
         )
     )
 
-    assert result.status == ToolExecutionStatus.FAILED
+    assert result.status == ToolExecutionStatus.AMBIGUOUS
     assert result.error is not None
+    assert result.error.code == "tool_outcome_ambiguous"
     assert result.error.details == {}
     assert "sentinel-private-diagnostic" not in result.model_dump_json()
+
+
+def test_unexpected_handler_failure_is_ambiguous_and_invoked_once() -> None:
+    calls: list[object] = []
+
+    def side_effect_then_fail(payload: object) -> None:
+        calls.append(payload)
+        raise RuntimeError("private downstream diagnostic")
+
+    tool = ToolDefinition(
+        tool_id="side_effect_tool",
+        name="side_effect_tool",
+        description="May complete an external action before returning.",
+        handler=side_effect_then_fail,
+    )
+    executor = ToolExecutor(ToolRegistry([tool]))
+    request = ToolExecutionRequest(
+        tool_id="side_effect_tool",
+        agent_id="analyst-1",
+        arguments={"action": "send"},
+        agent_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+    )
+
+    result = executor.execute(request)
+
+    assert result.status == ToolExecutionStatus.AMBIGUOUS
+    assert result.error is not None
+    assert result.error.code == "tool_outcome_ambiguous"
+    assert result.error.details == {}
+    assert "private downstream diagnostic" not in result.model_dump_json()
+    assert len(calls) == 1
 
 
 def test_executor_enforces_size_limits_without_declared_schemas() -> None:

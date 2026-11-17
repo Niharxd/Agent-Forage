@@ -182,6 +182,12 @@ preserve append order and prevent duplicate event writes. A database exception
 rolls back the complete transaction and is surfaced as an API failure; the
 engine does not retry tool or agent calls after a persistence failure.
 
+After a tool handler is invoked, an unexpected exception or exceeded duration
+budget is recorded as an `ambiguous` outcome: the external side effect may
+already have happened. The workflow fails without automatically invoking that
+tool again, and raw exception text is omitted. Synchronous handlers cannot be
+forcibly stopped; duration limits are detected after return.
+
 Retrieval validates and reconstructs detached API snapshots from the workflow
 definition, execution, task, and event rows. Listing and pagination are
 database-backed, so retrieval continues to work after process-local engine

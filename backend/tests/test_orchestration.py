@@ -189,7 +189,8 @@ def test_tool_failure_fails_task_and_blocks_dependents_without_leaking_details()
 
     assert result.status == WorkflowStatus.FAILED
     assert failed.status == TaskStatus.FAILED
-    assert failed.tool_result.status == ToolExecutionStatus.FAILED
+    assert failed.tool_result.status == ToolExecutionStatus.AMBIGUOUS
+    assert failed.tool_result.error.code == "tool_outcome_ambiguous"
     assert failed.tool_result.error.details == {}
     assert result.task_results["dependent"].status == TaskStatus.BLOCKED
     assert result.events[-1].event_type == WorkflowEventType.WORKFLOW_FAILED
