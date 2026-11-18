@@ -15,7 +15,7 @@ from agentforge.workflow.orchestrator import WorkflowOrchestrationError, Workflo
 from pydantic import SecretStr
 
 API_KEY = "test-key-not-for-logs"
-ACCESS_TOKEN = "test-api-access-token"
+ACCESS_TOKEN = "test-api-access-token-" + "x" * 24
 VALID_PLAN = {
     "objective": "Inspect the supplied task.",
     "proposed_steps": [

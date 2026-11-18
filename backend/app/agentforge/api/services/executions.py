@@ -254,6 +254,11 @@ class ExecutionRepository:
             raise ExecutionPersistenceError(
                 f"Approval request {approval_id} is not pending (status={approval.status!r})."
             )
+        if approval.expires_at <= datetime.now(UTC):
+            approval.status = "expired"
+            approval.reviewed_at = datetime.now(UTC)
+            self._finish_approval_decision(commit=commit)
+            raise ExecutionPersistenceError(f"Approval request {approval_id} has expired.")
         approval.status = "approved"
         approval.reviewed_at = datetime.now(UTC)
         self._finish_approval_decision(commit=commit)
@@ -270,9 +275,27 @@ class ExecutionRepository:
             raise ExecutionPersistenceError(
                 f"Approval request {approval_id} is not pending (status={approval.status!r})."
             )
+        if approval.expires_at <= datetime.now(UTC):
+            approval.status = "expired"
+            approval.reviewed_at = datetime.now(UTC)
+            self._finish_approval_decision(commit=commit)
+            raise ExecutionPersistenceError(f"Approval request {approval_id} has expired.")
         approval.status = "rejected"
         approval.reviewed_at = datetime.now(UTC)
         self._finish_approval_decision(commit=commit)
+        return approval
+
+    def expire_approval_request(self, approval_id: UUID, *, commit: bool = True) -> ApprovalRequest:
+        """Mark a still-pending approval as expired."""
+        approval = self._session.scalar(
+            select(ApprovalRequest).where(ApprovalRequest.id == approval_id).with_for_update()
+        )
+        if approval is None:
+            raise ExecutionPersistenceError(f"Approval request {approval_id} was not found.")
+        if approval.status == "pending":
+            approval.status = "expired"
+            approval.reviewed_at = datetime.now(UTC)
+            self._finish_approval_decision(commit=commit)
         return approval
 
     def _finish_approval_decision(self, *, commit: bool) -> None:
@@ -287,6 +310,7 @@ class ExecutionRepository:
 
     def get_pending_approval_requests(self, *, execution_id: UUID) -> list[ApprovalRequest]:
         """Return all pending approval requests for an execution."""
+        self._expire_pending_approvals(execution_id=execution_id)
         return list(
             self._session.scalars(
                 select(ApprovalRequest).where(
@@ -296,8 +320,26 @@ class ExecutionRepository:
             )
         )
 
+    def _expire_pending_approvals(self, *, execution_id: UUID) -> None:
+        now = datetime.now(UTC)
+        stale = list(
+            self._session.scalars(
+                select(ApprovalRequest).where(
+                    ApprovalRequest.execution_id == execution_id,
+                    ApprovalRequest.status == "pending",
+                    ApprovalRequest.expires_at <= now,
+                )
+            )
+        )
+        if stale:
+            for approval in stale:
+                approval.status = "expired"
+                approval.reviewed_at = now
+            self._session.flush()
+
     def get_approval_requests(self, *, execution_id: UUID) -> list[ApprovalRequest]:
         """Return approval rows for one execution, newest first."""
+        self._expire_pending_approvals(execution_id=execution_id)
         return list(
             self._session.scalars(
                 select(ApprovalRequest)

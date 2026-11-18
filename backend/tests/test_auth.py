@@ -92,6 +92,24 @@ def test_invalid_credential_and_disallowed_origin_are_rejected() -> None:
         assert missing.status_code == 422
 
 
+def test_login_rate_limit_blocks_repeated_invalid_credentials() -> None:
+    with client() as test_client:
+        for _ in range(5):
+            response = test_client.post(
+                "/api/v1/auth/session",
+                json={"credential": "wrong"},
+                headers={"Origin": ORIGIN},
+            )
+            assert response.status_code == 401
+        blocked = test_client.post(
+            "/api/v1/auth/session",
+            json={"credential": "test-operator-secret"},
+            headers={"Origin": ORIGIN},
+        )
+        assert blocked.status_code == 429
+        assert blocked.headers["retry-after"]
+
+
 def test_missing_operator_credential_configuration_fails_closed() -> None:
     with client(token=None) as test_client:
         response = test_client.post(
@@ -130,7 +148,23 @@ def test_production_requires_authentication_secrets_and_explicit_origins() -> No
         Settings(
             _env_file=None,
             app_env="production",
+            api_access_token=SecretStr("operator-" + "x" * 32),
+            session_signing_secret=SecretStr("s" * 40),
+        )
+    with pytest.raises(ValueError, match="at least 32 characters"):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            cors_origins=["https://dashboard.example"],
             api_access_token=SecretStr("operator"),
+            session_signing_secret=SecretStr("s" * 40),
+        )
+    with pytest.raises(ValueError, match="must use HTTPS"):
+        Settings(
+            _env_file=None,
+            app_env="production",
+            cors_origins=[ORIGIN],
+            api_access_token=SecretStr("operator-" + "x" * 32),
             session_signing_secret=SecretStr("s" * 40),
         )
     with pytest.raises(ValueError, match="app_env"):
@@ -142,13 +176,13 @@ def test_production_session_cookie_is_secure() -> None:
         _env_file=None,
         app_env="production",
         cors_origins=["https://dashboard.example"],
-        api_access_token=SecretStr("operator"),
+        api_access_token=SecretStr("operator-" + "x" * 32),
         session_signing_secret=SecretStr("s" * 40),
     )
     with TestClient(create_app(settings), base_url="https://testserver") as test_client:
         response = test_client.post(
             "/api/v1/auth/session",
-            json={"credential": "operator"},
+            json={"credential": "operator-" + "x" * 32},
             headers={"Origin": "https://dashboard.example"},
         )
         cookie = response.headers["set-cookie"].lower()
@@ -221,7 +255,7 @@ def test_session_authentication_preserves_openai_router_protection(monkeypatch) 
         app_env="test",
         provider_mode="openai",
         openai_api_key=SecretStr("provider-key"),
-        api_access_token=SecretStr("operator-bearer"),
+        api_access_token=SecretStr("operator-bearer-" + "x" * 24),
         session_signing_secret=SecretStr("s" * 40),
         cors_origins=[ORIGIN],
     )
@@ -234,7 +268,7 @@ def test_session_authentication_preserves_openai_router_protection(monkeypatch) 
         )
         login = test_client.post(
             "/api/v1/auth/session",
-            json={"credential": "operator-bearer"},
+            json={"credential": "operator-bearer-" + "x" * 24},
             headers={"Origin": ORIGIN},
         )
         assert login.status_code == 200
@@ -261,7 +295,7 @@ def test_production_mock_mode_protects_workflow_and_execution_apis(monkeypatch) 
         app_env="production",
         provider_mode="mock",
         cors_origins=["https://dashboard.example"],
-        api_access_token=SecretStr("production-operator-token"),
+        api_access_token=SecretStr("production-operator-token-" + "x" * 16),
         session_signing_secret=SecretStr("p" * 40),
     )
     application = create_app(settings)
@@ -270,13 +304,13 @@ def test_production_mock_mode_protects_workflow_and_execution_apis(monkeypatch) 
             assert test_client.get(path).status_code == 401
             bearer_response = test_client.get(
                 path,
-                headers={"Authorization": "Bearer production-operator-token"},
+                headers={"Authorization": "Bearer " + "production-operator-token-" + "x" * 16},
             )
             assert bearer_response.status_code == 200
 
         login = test_client.post(
             "/api/v1/auth/session",
-            json={"credential": "production-operator-token"},
+            json={"credential": "production-operator-token-" + "x" * 16},
             headers={"Origin": "https://dashboard.example"},
         )
         assert login.status_code == 200

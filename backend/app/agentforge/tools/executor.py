@@ -132,7 +132,13 @@ class ToolExecutor:
 
             with self._approval_lock:
                 stored_grant = self.approval_registry.get(approval_grant.approval_id)
-                if stored_grant is None or stored_grant.status != "approved":
+                if (
+                    stored_grant is None
+                    or stored_grant.status != "approved"
+                    or stored_grant.expires_at <= datetime.now(UTC)
+                ):
+                    if stored_grant is not None and stored_grant.expires_at <= datetime.now(UTC):
+                        self.approval_registry.pop(approval_grant.approval_id, None)
                     return self._result(
                         execution_request,
                         ToolExecutionStatus.AWAITING_APPROVAL,

@@ -35,6 +35,10 @@ existing bearer token remains accepted by protected APIs; browser sessions
 authenticate protected workflow and execution routes and approval routes when
 router authentication is enabled (OpenAI mode or any production deployment).
 Development mock mode deliberately keeps those routers unauthenticated.
+Protected deployments require an operator token of at least 32 characters.
+Login failures are throttled per client for a short cooling-off window.
+Production CORS origins must use HTTPS; local HTTP origins are permitted only
+for development and test configurations.
 
 - User input, model output, tool output, and content retrieved by tools are untrusted.
 - Provider responses may be malformed, adversarially influenced, incomplete, or false.
@@ -55,11 +59,11 @@ Development mock mode deliberately keeps those routers unauthenticated.
 | Ambiguous timeout/retry duplicates a side effect | Duplicate external operation | Retry only classified transient failures; require idempotency contract/key for side-effect retry; otherwise mark outcome ambiguous and request operator recovery. |
 | Credential leakage in prompt, logs, API, or database | Account compromise | Environment/secret-store configuration; never put secrets in prompts or user-visible results; structured redaction; avoid logging headers/credential-bearing arguments; test redaction. |
 | Cross-site scripting through task/plan/tool output | Operator session compromise | Render untrusted values as text; sanitize any explicitly supported rich text; use standard React escaping and a restrictive Content Security Policy in deployed UI. |
-| API abuse or unauthorized approval | Workflow manipulation or data exposure | Exact-origin CSRF checks for cookie decisions, signed expiring session, existing bearer auth, restrict network exposure; rate/size limits; audit actor attribution remains shared. |
+| API abuse or unauthorized approval | Workflow manipulation or data exposure | Exact-origin CSRF checks for cookie decisions, signed expiring session, existing bearer auth, restrict network exposure; login throttling, request-size limits, durable 24-hour approval expiry; audit actor attribution remains shared. |
 | Database tampering or deletion | False history, lost work, unauthorized disclosure | Least-privilege DB account; network isolation; backups and restore tests; append-only audit discipline at application level; encryption/retention policy determined for deployment. |
 | Resource exhaustion via large tasks, plans, loops, or slow provider calls | Service degradation/cost escalation | 10,000-character task limit, plan/step limits, one tool request per step, timeouts, retry/active-duration caps, provider budgets/rate limits, and a single worker in the MVP. |
 | Worker crash/replay during external action | Concurrent or duplicated side effects; misleading status | Durable execution claim, failed state with recovery-required reason for ambiguity, idempotency rules, transactionally persisted transitions; do not claim exactly-once effects. |
-| Dependency or container compromise | Code execution, credential theft, supply-chain risk | Pin/review dependencies and base images, scan in CI, minimal runtime privileges, no Docker socket exposure, controlled image provenance (deployment milestone). |
+| Dependency or container compromise | Code execution, credential theft, supply-chain risk | Pin/review dependencies and base images, scan in CI, minimal runtime privileges, no Docker socket exposure, controlled image provenance (deployment milestone). The frontend remains exposed to `GHSA-fc5q-39xc-vjpf` through Vite's transitive picomatch chain because no compatible patched release is currently available. |
 
 ## Security requirements and checks
 

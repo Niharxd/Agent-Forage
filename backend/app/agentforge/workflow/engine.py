@@ -1229,7 +1229,7 @@ class WorkflowEngine:
         # Persist the pending approval request durably so it survives
         # application restart and can be validated against the database.
         if self._approval_repository is not None:
-            self._approval_repository.create_approval_request(
+            approval = self._approval_repository.create_approval_request(
                 approval_id=UUID(grant.approval_id),
                 execution_id=execution.execution_id,
                 execution_step_id=self._approval_repository.get_execution_step_id(
@@ -1241,6 +1241,7 @@ class WorkflowEngine:
                 action_digest=grant.action_digest,
                 safe_arguments={},
             )
+            grant.expires_at = approval.expires_at
         self._approval_registry[grant.approval_id] = grant
         self._pending_approvals[(execution.execution_id, task.task_id)] = grant
         return grant

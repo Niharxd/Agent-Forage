@@ -6,8 +6,11 @@ from pydantic import BaseModel, ConfigDict, SecretStr
 
 from agentforge.api.auth import (
     SESSION_COOKIE,
+    check_login_rate_limit,
+    clear_login_failures,
     create_operator_session,
     get_operator_session_id,
+    record_login_failure,
     revoke_operator_session,
     secure_compare,
     validate_browser_origin,
@@ -24,12 +27,15 @@ class SessionLogin(BaseModel):
 @router.post("/session")
 def login(body: SessionLogin, request: Request, response: Response) -> dict[str, object]:
     validate_browser_origin(request)
+    check_login_rate_limit(request)
     settings = request.app.state.settings
     expected = settings.api_access_token
     if expected is None or not expected.get_secret_value().strip():
         raise HTTPException(status_code=503, detail="Operator authentication is unavailable.")
     if not secure_compare(body.credential.get_secret_value(), expected.get_secret_value()):
+        record_login_failure(request)
         raise HTTPException(status_code=401, detail="The operator credential is invalid.")
+    clear_login_failures(request)
     token, expires_at = create_operator_session(request)
     response.set_cookie(
         SESSION_COOKIE,

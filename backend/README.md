@@ -49,6 +49,11 @@ scheme has no individual identities, MFA, or per-operator audit attribution
 and is not a public-internet or multi-tenant identity system. Local development
 uses the Vite `/api` proxy, so configure `CORS_ORIGINS=["http://localhost:5173"]`
 and set both local secrets. Never use a browser-visible `VITE_*` secret.
+Protected deployments must use an `API_ACCESS_TOKEN` with at least 32
+characters; failed login attempts are throttled per client. Approval requests
+expire after 24 hours and stale requests are rejected and marked `expired`.
+The backend lockfile currently resolves `opentelemetry-api` 1.45.2 and pytest
+9.2.0; run `pip-audit` against the synchronized `backend/.venv` before release.
 
 ## Start the local database
 

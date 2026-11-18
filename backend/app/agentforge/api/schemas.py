@@ -123,6 +123,7 @@ class ExecutionApprovalResponse(BaseModel):
     action_description: str
     status: str
     requested_at: datetime
+    expires_at: datetime
     reviewed_at: datetime | None = None
 
 

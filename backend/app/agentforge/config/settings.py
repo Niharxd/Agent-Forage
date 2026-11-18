@@ -73,6 +73,16 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "CORS_ORIGINS must contain the deployed frontend origin in production"
                 )
+            if any(not origin.lower().startswith("https://") for origin in self.cors_origins):
+                raise ValueError("Production CORS_ORIGINS must use HTTPS")
+        if (
+            self.api_access_token is not None
+            and (self.app_env.casefold() == "production" or self.provider_mode == "openai")
+            and len(self.api_access_token.get_secret_value()) < 32
+        ):
+            raise ValueError(
+                "API_ACCESS_TOKEN must contain at least 32 characters in protected deployments"
+            )
         return self
 
     @field_validator("log_level")

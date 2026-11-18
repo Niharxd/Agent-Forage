@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from socket import timeout as SocketTimeout
 from urllib.error import HTTPError, URLError
@@ -400,6 +401,47 @@ def test_executor_rejects_reused_approval_grant() -> None:
     )
     assert reused.status == ToolExecutionStatus.AWAITING_APPROVAL
     assert calls == []
+
+
+def test_executor_rejects_expired_approval_grant() -> None:
+    tool = ToolDefinition(
+        tool_id="sensitive_tool",
+        name="Sensitive tool",
+        description="Requires approval",
+        required_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+        requires_approval=True,
+        handler=lambda arguments: arguments,
+    )
+    approval_registry: dict[str, ApprovalGrant] = {}
+    executor = ToolExecutor(ToolRegistry([tool]), approval_registry=approval_registry)
+    grant = ApprovalGrant(
+        execution_id="execution-1",
+        task_id="task-1",
+        tool_id="sensitive_tool",
+        action_description="Approve",
+        action_digest=ApprovalGrant.compute_action_digest(
+            "execution-1", "task-1", "sensitive_tool", {"value": "safe"}
+        ),
+        safe_arguments={"value": "safe"},
+        status="approved",
+        expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    approval_registry[grant.approval_id] = grant
+
+    result = executor.execute(
+        ToolExecutionRequest(
+            agent_id="analyst-1",
+            execution_id="execution-1",
+            task_id="task-1",
+            tool_id="sensitive_tool",
+            arguments={"value": "safe"},
+            agent_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+            approval_grant=grant,
+        )
+    )
+
+    assert result.status == ToolExecutionStatus.AWAITING_APPROVAL
+    assert grant.approval_id not in approval_registry
 
 
 def test_workflow_engine_stops_for_approval_and_resumes_after_approval() -> None:

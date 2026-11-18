@@ -20,7 +20,7 @@
     "react-dom": "19.1.0",
     "react-router-dom": "^7.18.5",
     "tailwindcss": "^4.3.3",
-    "vite": "6.3.5"
+    "vite": "6.4.6"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "6.6.3",

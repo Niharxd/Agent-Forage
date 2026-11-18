@@ -1,5 +1,6 @@
 """Workflow execution lifecycle endpoints."""
 
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -120,6 +121,7 @@ def list_execution_approvals(
             action_description=row.action_description,
             status=row.status,
             requested_at=row.requested_at,
+            expires_at=row.expires_at,
             reviewed_at=row.reviewed_at,
         )
         for row in repository.get_approval_requests(execution_id=execution_id)
@@ -141,6 +143,9 @@ def _review_approval(
         raise HTTPException(status_code=404, detail="Approval not found.")
     if approval.status != "pending":
         raise HTTPException(status_code=409, detail="Approval is no longer pending.")
+    if approval.expires_at <= datetime.now(UTC):
+        repository.expire_approval_request(approval_id)
+        raise HTTPException(status_code=409, detail="Approval has expired.")
     engine._approval_repository = repository
     try:
         result = engine.approve(

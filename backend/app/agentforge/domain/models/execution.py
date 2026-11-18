@@ -1,6 +1,6 @@
 """Workflow execution, attempt, approval, tool, and audit models."""
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -193,6 +193,12 @@ class ApprovalRequest(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC) + timedelta(hours=24),
+        server_default=text("now() + interval '24 hours'"),
     )
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

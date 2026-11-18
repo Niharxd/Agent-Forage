@@ -72,6 +72,18 @@ proportions. Its supplied transparency and gradient are preserved.
 Submitted task descriptions are persisted by the backend. Do not submit
 credentials or content that must not be retained.
 
+## Dependency security note
+
+The production dependency graph currently uses Vite 6.4.6, which resolves
+`vite -> tinyglobby@0.2.17 -> fdir@6.5.0 -> picomatch@4.0.7`.
+`npm audit --omit=dev` reports `GHSA-fc5q-39xc-vjpf` against picomatch
+(`<=4.0.7`, high severity ReDoS). No patched picomatch release is published,
+and Vite 7.x and 8.x retain the same dependency range. npm's suggested Vite
+6.2.7 workaround has separate Vite vulnerabilities and is not used. Re-run
+both npm audit commands when Vite, tinyglobby, fdir, or picomatch releases
+change; do not add an override unless a published patched version passes the
+frontend test, typecheck, and build checks.
+
 ## Theme implementation
 
 The application uses a centralized theme provider and stores the selected preference in `localStorage` with support for light, dark, and system themes. The theme is applied to the `document.documentElement` and the active theme is reused across all routes.

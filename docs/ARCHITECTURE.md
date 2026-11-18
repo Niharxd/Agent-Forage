@@ -24,6 +24,14 @@ requires HTTPS and same-origin UI/API routing (the existing frontend uses
 relative `/api` paths). The dashboard never
 receives or stores the shared bearer credential. This is one shared operator
 identity, not per-person attribution, MFA, or RBAC.
+Protected deployments require a 32-character operator token, login failures
+are throttled per client, and approval requests carry a durable 24-hour
+expiration. Stale approvals are marked expired before they can be reviewed.
+The current frontend dependency scan still reports
+`GHSA-fc5q-39xc-vjpf` through Vite's transitive `picomatch` dependency.
+Vite 6.4.6 is retained because it fixes the Vite advisories and is compatible
+with the application; the only npm-reported alternative, Vite 6.2.7, is itself
+vulnerable and is not an acceptable downgrade.
 
 AgentForge separates planning, workflow policy, execution, and provider/tool integrations. Agents are role-specific prompts/adapters invoked by the engine; they are not independent processes with authority to select arbitrary capabilities.
 

@@ -57,6 +57,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     application.state.settings = app_settings
     application.state.active_sessions = {}
+    application.state.login_attempts = {}
     application.state.session_lock = RLock()
     application.add_middleware(
         RequestSizeLimitMiddleware,

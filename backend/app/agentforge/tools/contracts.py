@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, Literal, TypeAlias
 from uuid import uuid4
@@ -140,6 +140,7 @@ class ApprovalGrant(BaseModel):
     safe_arguments: JsonObject = Field(default_factory=dict)
     status: Literal["pending", "approved", "rejected", "consumed"] = "pending"
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    expires_at: datetime = Field(default_factory=lambda: datetime.now(UTC) + timedelta(hours=24))
     reviewed_at: datetime | None = None
     consumed_at: datetime | None = None
 

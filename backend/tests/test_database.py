@@ -1357,7 +1357,7 @@ def test_approval_api_auth_binding_review_and_health(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Approval endpoints authenticate operators and bind reviews to one execution."""
-    token = "approval-operator-token"
+    token = "approval-operator-token-" + "x" * 20
     settings = Settings(_env_file=None, app_env="test", api_access_token=SecretStr(token))
     application = create_app(settings)
     calls: list[dict[str, object]] = []
@@ -1526,7 +1526,7 @@ def test_openai_browser_session_authenticates_workflow_execution_and_approvals(
 ) -> None:
     """A browser session protects the full OpenAI-mode operator workflow."""
     origin = "http://localhost:5173"
-    token = "browser-flow-operator-token"
+    token = "browser-flow-operator-token-" + "x" * 16
     settings = Settings(
         _env_file=None,
         app_env="test",
