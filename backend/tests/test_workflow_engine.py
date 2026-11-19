@@ -1,3 +1,5 @@
+import logging
+
 import pytest
 from agentforge.agents import (
     AnalystAgent,
@@ -329,6 +331,31 @@ def test_successful_execution_emits_lifecycle_events_and_timestamps() -> None:
     assert result.events[0].timestamp.tzinfo is not None
     assert result.events[0].occurred_at == result.events[0].timestamp
     assert result.events[2].details["task_id"] == "one"
+
+
+def test_lifecycle_logging_contains_correlations_without_task_payload(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO, logger="agentforge.workflow.engine"):
+        result = WorkflowEngine().execute(
+            workflow(
+                task(
+                    "one",
+                    input_data={"secret": "must-not-be-logged"},
+                )
+            )
+        )
+
+    lifecycle_record = next(
+        record for record in caplog.records if record.event_type == "task_completed"
+    )
+    assert lifecycle_record.execution_id == str(result.execution_id)
+    assert lifecycle_record.task_id == "one"
+    assert lifecycle_record.agent_type == "analyst"
+    assert lifecycle_record.status == "completed"
+    assert lifecycle_record.duration_ms is not None
+    assert lifecycle_record.failure_category is None
+    assert "must-not-be-logged" not in caplog.text
 
 
 def test_invalid_workflow_is_rejected_before_agent_invocation() -> None:

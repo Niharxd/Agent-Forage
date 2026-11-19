@@ -117,6 +117,33 @@ python -m uv --directory backend run ruff check app tests migrations
 Remove-Item Env:APP_ENV
 ```
 
+For a focused, database-independent workflow/tool/security run:
+
+```powershell
+python -m uv --directory backend run pytest `
+  tests/test_workflow_engine.py tests/test_workflow_reliability.py `
+  tests/test_orchestration.py tests/test_tools.py tests/test_auth.py
+```
+
+The frontend suite is run separately from `frontend` with `npm test`,
+`npm run typecheck`, and `npm run build`. Full backend integration coverage
+requires PostgreSQL 16 or newer and a local `agentforge_test` database; a
+missing role, unavailable server, or incorrect test URL is an environment
+failure, not an implementation result.
+
+### Logging and execution diagnostics
+
+Backend logs are one JSON object per line. Lifecycle records use the stable
+fields `workflow_name`, `execution_id`, `task_id`, `agent_type`, `tool_id`, `status`,
+`duration_ms`, `failure_category`, `approval_status`, and `event_type` when
+available. Task input, tool arguments, credentials, bearer tokens, and raw
+exception messages are not logged. `failure_category` distinguishes ordinary
+agent/tool failures from `tool_outcome_ambiguous`; the latter means a handler
+was invoked but its side effect cannot be confirmed and is not automatically
+retried. Persisted execution events remain the durable diagnostic history and
+include task transitions, approval waits/decisions, cancellation, timing, and
+safe failure codes.
+
 The API liveness endpoint does not require the database. Request handlers can
 inject a request-scoped SQLAlchemy `Session` with
 `agentforge.database.dependencies.get_db_session`; its transaction is rolled
@@ -214,6 +241,13 @@ side-effect outcome may be ambiguous and must not be automatically retried.
 The Vite development server proxies `/api` to `http://127.0.0.1:8000`. Run the
 backend on that address while using the live execution history screen. A
 deployed frontend must route `/api` to the backend on the same origin.
+
+Known testing limitations: planner/provider tests use the deterministic mock
+provider and registered fake tools; no test calls an external LLM or network
+service. API start is synchronous, cancellation is cooperative between
+agent/tool calls, and active executions are not rehydrated after a process
+restart. These limitations are implementation constraints, not claims of
+complete end-to-end worker coverage.
 
 The Day 12 migration adds the engine's `pending`/`completed` workflow and
 `completed`/`blocked`/`skipped` task states to existing constraints and adds a

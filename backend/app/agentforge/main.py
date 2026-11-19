@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 
+import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -26,12 +27,48 @@ from agentforge.database.engine import create_database_engine, create_session_fa
 from agentforge.workflow.engine import WorkflowEngine
 
 
+class StructuredLogFormatter(logging.Formatter):
+    """Render safe correlation fields as one JSON object per log line."""
+
+    _FIELD_NAMES = (
+        "workflow_name",
+        "execution_id",
+        "task_id",
+        "agent_type",
+        "tool_id",
+        "status",
+        "duration_ms",
+        "failure_category",
+        "approval_status",
+        "event_type",
+        "exception_type",
+    )
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict[str, object] = {
+            "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S%z"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        for field_name in self._FIELD_NAMES:
+            value = getattr(record, field_name, None)
+            if value is not None:
+                payload[field_name] = value
+        return json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+
+
 def configure_logging(log_level: str) -> None:
     logging.basicConfig(
         level=log_level,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        format="%(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S%z",
+        force=True,
     )
-    logging.getLogger().setLevel(log_level)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    for handler in root_logger.handlers:
+        handler.setFormatter(StructuredLogFormatter())
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:

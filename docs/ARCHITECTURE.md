@@ -101,6 +101,23 @@ State transitions are validated centrally by `WorkflowEngine`. The persistence a
 
 **Restart behavior:** execution records, steps, results, timestamps, and ordered events survive API restarts and can be retrieved/listed from PostgreSQL. The in-memory engine does not rehydrate active executions, so a pending or interrupted execution cannot be started or resumed after restart; no recovery worker or durable claim is implemented. Exactly-once external effects are not promised.
 
+**Testing and diagnostics:** backend unit and contract tests use deterministic
+agents and registered fake tools; persistence tests use PostgreSQL rather than
+an SQLite substitute. The isolated `agentforge_test` database is migrated and
+cleaned by the test fixture, and must be separate from the application
+database. Frontend journey tests use Vitest and Testing Library with mocked
+HTTP boundaries, so they verify UI behavior and API contracts rather than
+claiming a browser-to-live-backend end-to-end path.
+
+Application logs are structured JSON records with correlated execution and
+task identifiers plus agent/tool, status, duration, approval, event, and safe
+failure-category fields. They deliberately exclude credentials, authorization
+headers, tool arguments, task payloads, and raw exception text. The persisted
+execution event stream is the source of truth for detailed diagnostics;
+`tool_outcome_ambiguous` is distinct from an ordinary failure because the
+handler may have produced an external side effect before its outcome became
+unknown. No distributed tracing platform is implemented or claimed.
+
 ## Data flow
 
 ```mermaid

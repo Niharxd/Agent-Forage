@@ -658,6 +658,7 @@ class WorkflowEngine:
             logger.error(
                 "Workflow task input preparation failed",
                 extra={
+                    "workflow_name": execution.workflow.name,
                     "execution_id": str(execution.execution_id),
                     "task_id": task.task_id,
                     "agent_type": task.agent_type.value,
@@ -1130,11 +1131,52 @@ class WorkflowEngine:
             self._history.popitem(last=False)
         self._active.pop(execution.execution_id, None)
 
-    @staticmethod
     def _notify(
+        self,
         execution: WorkflowExecution,
         on_update: ExecutionUpdateCallback | None,
     ) -> None:
+        if execution.events:
+            event = execution.events[-1]
+            task_result = (
+                execution.task_results.get(event.task_id) if event.task_id is not None else None
+            )
+            tool_result = task_result.tool_result if task_result is not None else None
+            failure_category = (
+                task_result.error.code
+                if task_result is not None and task_result.error is not None
+                else (tool_result.error.code if tool_result and tool_result.error else None)
+            )
+            duration_ms = (
+                task_result.tool_result.duration_ms
+                if task_result is not None and task_result.tool_result is not None
+                else (
+                    task_result.agent_result.execution_duration_ms
+                    if task_result is not None and task_result.agent_result is not None
+                    else None
+                )
+            )
+            logger.log(
+                logging.WARNING if failure_category is not None else logging.INFO,
+                "workflow lifecycle event",
+                extra={
+                    "execution_id": str(execution.execution_id),
+                    "task_id": event.task_id,
+                    "agent_type": (
+                        task_result.agent_type.value if task_result is not None else None
+                    ),
+                    "tool_id": (
+                        tool_result.tool_id
+                        if tool_result is not None
+                        else event.metadata.get("tool_id")
+                    ),
+                    "status": event.to_status or execution.status.value,
+                    "duration_ms": duration_ms,
+                    "failure_category": failure_category,
+                    "approval_status": event.metadata.get("approval_status"),
+                    "event_type": event.event_type.value,
+                },
+            )
         if on_update is not None:
             on_update(execution.snapshot())
 
