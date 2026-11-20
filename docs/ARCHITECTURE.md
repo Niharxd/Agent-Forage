@@ -33,23 +33,36 @@ Vite 6.4.6 is retained because it fixes the Vite advisories and is compatible
 with the application; the only npm-reported alternative, Vite 6.2.7, is itself
 vulnerable and is not an acceptable downgrade.
 
-AgentForge separates planning, workflow policy, execution, and provider/tool integrations. Agents are role-specific prompts/adapters invoked by the engine; they are not independent processes with authority to select arbitrary capabilities.
+AgentForge separates planning, workflow policy, execution, persistence, and
+provider/tool integrations. Agents are role-specific adapters invoked by the
+engine; they are not independent processes with authority to select arbitrary
+capabilities.
 
 ```mermaid
-flowchart LR
-    U[Operator] --> UI[React dashboard]
-    UI --> API[FastAPI control API]
-    API --> S[Application services]
-    S --> DB[(PostgreSQL)]
-    S --> P[Planner service]
-    S --> E[Workflow engine]
-    P --> L[LLM provider interface]
-    E --> L
-    E --> T[Tool registry and policy]
-    T --> X[Explicit tool adapters]
-    E --> R[Reviewer service]
-    R --> L
-    E --> DB
+flowchart TD
+    U[Operator] -->|Task or action| UI[React dashboard]
+    UI -->|HTTP JSON /api/v1| API[FastAPI control API]
+    API --> AUTH[Auth boundary]
+    AUTH -->|Prepare| PREP[Workflow orchestrator]
+    PREP --> PLAN[Planner agent]
+    PLAN --> PROVIDER{Provider mode}
+    PROVIDER -->|default| MOCK[Mock provider]
+    PROVIDER -->|optional| OPENAI[OpenAI Planner adapter]
+    MOCK --> VALID[Schema and DAG validation]
+    OPENAI --> VALID
+    VALID --> DB[(PostgreSQL)]
+    UI -->|Explicit start| API
+    API --> ENGINE[Sequential workflow engine]
+    ENGINE --> AGENTS[Researcher or Analyst agents]
+    ENGINE --> TOOLPOLICY[Tool registry, capability and schema checks]
+    TOOLPOLICY -->|Approval required| AP[Persist approval request]
+    AP -->|Approve or reject| ENGINE
+    TOOLPOLICY -->|Permitted| ADAPTER[Registered tool adapter]
+    ENGINE --> REVIEWER[Reviewer agent]
+    ENGINE --> EVENTS[Execution snapshot and event persistence]
+    REVIEWER --> EVENTS
+    EVENTS --> DB
+    DB --> UI
 ```
 
 ### Component responsibilities
@@ -90,6 +103,9 @@ stateDiagram-v2
     pending --> running: explicit start
     pending --> cancelled
     running --> completed: all tasks succeed
+    running --> waiting_approval: gated tool reached
+    waiting_approval --> running: approval granted
+    waiting_approval --> failed: rejection or expiry
     running --> failed: task failure or limit reached
     running --> cancelled: user cancels
     completed --> [*]
@@ -97,7 +113,21 @@ stateDiagram-v2
     cancelled --> [*]
 ```
 
-State transitions are validated centrally by `WorkflowEngine`. The persistence adapter does not duplicate transition rules; each accepted engine snapshot and its newly appended events are committed together. A transition record includes execution, prior/new state, timestamp, system source, and a safe reason. The current engine does not retry tasks. If a registered tool raises unexpectedly after invocation or exceeds its measured duration budget, the tool result is `ambiguous` because an external side effect may already have occurred. The workflow fails, raw exception text is omitted, and no automatic retry occurs. Synchronous handlers cannot be forcibly interrupted; duration limits are checked after they return.
+State transitions are validated centrally by `WorkflowEngine`. The persistence adapter does not duplicate transition rules; each accepted engine snapshot and its newly appended events are committed together. A transition record includes execution, prior/new state, timestamp, system source, and a safe reason. Provider calls and tool actions use bounded contracts, but the in-process engine does not implement automatic task retries. If a registered tool raises unexpectedly after invocation or exceeds its measured duration budget, the tool result is `ambiguous` because an external side effect may already have occurred. The workflow fails, raw exception text is omitted, and no automatic retry occurs. Synchronous handlers cannot be forcibly interrupted; duration limits are checked after they return.
+
+## Request and approval flow
+
+1. The React dashboard submits task text to `POST /api/v1/workflows/prepare`.
+2. `WorkflowOrchestrator.prepare()` calls the registered Planner. Mock mode is deterministic; OpenAI mode uses the opt-in planner adapter.
+3. The draft is converted to a declarative workflow and checked by `WorkflowValidator`, including the DAG, role allowlist, task limits, and preflight tool permissions.
+4. Preparation persists the workflow version, pending execution, task rows, and creation event in a database transaction. No agent or tool runs.
+5. The operator reviews the safe plan and calls `POST /api/v1/executions/{execution_id}/start`.
+6. `WorkflowEngine.run()` transitions the execution to running and executes ready tasks sequentially in stable plan order.
+7. Before dispatch, the tool executor verifies registration, enablement, agent capabilities, typed arguments, and schema/size limits.
+8. Read-only/analysis tools may invoke their registered handler. Approval-gated tools create a persisted request and move the execution/task to waiting approval; no handler runs.
+9. The operator approves or rejects the exact execution/task/tool/action digest. Approval expires after 24 hours and is consumed when the tool is invoked.
+10. On approval, the engine resumes and rechecks the grant, action digest, task, and tool before invocation. Rejection or expiry fails the waiting task without invocation.
+11. The engine persists task outcomes and events, invokes the Reviewer after planned work succeeds, and stores the terminal execution/report.
 
 **Restart behavior:** execution records, steps, results, timestamps, and ordered events survive API restarts and can be retrieved/listed from PostgreSQL. The in-memory engine does not rehydrate active executions, so a pending or interrupted execution cannot be started or resumed after restart; no recovery worker or durable claim is implemented. Exactly-once external effects are not promised.
 

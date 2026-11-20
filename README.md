@@ -1,150 +1,248 @@
 # AgentForge
 
-AgentForge is a self-hosted application for turning a task into an inspectable,
-validated workflow. The approved scope, architecture, roadmap, and threat model
-are documented in [`docs/`](docs/).
+AgentForge is a self-hosted operator application that turns a natural-language task into a validated, inspectable workflow. It provides a bounded sequential execution engine, role-specific agents, explicitly registered tools, approval gates, PostgreSQL history, and a React dashboard.
 
-The backend provides versioned workflow and execution APIs, PostgreSQL-backed
-workflow/execution history, a bounded sequential engine, and a React dashboard
-with execution history and dependency-graph visualization. Mock agents remain
-the default. Day 15 adds an optional OpenAI Planner adapter and an explicitly
-requested, read-only Wikipedia search tool.
+This repository is a local/private MVP. It is not a general-purpose autonomous computer-use agent, a code-generation runtime, or a production-ready multi-tenant service.
 
-## Repository layout
+## What it does
 
-| Path | Purpose |
+- Prepares planner-generated JSON workflows from operator task text.
+- Validates workflow schemas, dependency DAGs, task limits, role allowlists, and tool permissions before persistence.
+- Executes eligible steps sequentially without granting agents direct control of the tool registry.
+- Supports the deterministic mock provider and an opt-in OpenAI Planner adapter.
+- Provides text analysis, JSON inspection, calculator, and read-only English Wikipedia search tools.
+- Requires explicit operator approval for approval-gated actions and binds it to the execution, task, tool, and canonical argument digest.
+- Persists workflow definitions, execution state, task results, approval requests, events, and final status in PostgreSQL.
+- Displays workflow graphs, execution history, task results, events, and approval controls in the React dashboard.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    U[Operator] -->|Task or start/approval action| UI[React and TypeScript dashboard]
+    UI -->|JSON over /api/v1| API[FastAPI API]
+    API --> AUTH[Bearer or browser session auth]
+    AUTH --> PREP[Workflow preparation service]
+    PREP --> PLANNER[Planner agent]
+    PLANNER --> PROVIDER{Mock or OpenAI provider}
+    PROVIDER --> VALID[Workflow and tool policy validation]
+    VALID --> DB[(PostgreSQL and Alembic)]
+    UI -->|Explicit start| API
+    API --> ENGINE[Sequential workflow engine]
+    ENGINE --> AGENTS[Planner, Researcher, Analyst, Reviewer]
+    ENGINE --> TOOLS[Tool registry and executor]
+    TOOLS --> POLICY[Capability and argument checks]
+    POLICY -->|Approval required| APPROVAL[Persist approval request]
+    APPROVAL -->|Approve or reject| ENGINE
+    POLICY -->|Preapproved or read-only| ADAPTERS[Registered tool adapters]
+    ENGINE --> HISTORY[Execution snapshots and audit events]
+    HISTORY --> UI
+```
+
+Planning creates a validated, pending workflow and execution. It does not execute tasks or tools. Starting a pending execution is a separate explicit action. For a complete code-mapped description, see [Architecture](docs/ARCHITECTURE.md) and [Threat Model](docs/THREAT_MODEL.md).
+
+## Technology stack
+
+| Area | Technology |
 | --- | --- |
-| `backend/` | Python backend package and its package-level tests. |
-| `frontend/` | React, Vite, and TypeScript dashboard package. |
-| `docs/` | Approved product, architecture, roadmap, and threat-model documents. |
-| `scripts/` | Home for repeatable local development and maintenance scripts. |
-| `tests/` | Reserved for cross-package integration tests. |
-| `.github/workflows/` | Continuous-integration workflows. |
+| API | Python 3.11-3.14, FastAPI, Pydantic, SQLAlchemy |
+| Database | PostgreSQL 16, psycopg, Alembic |
+| Workflow | Typed agent interfaces, versioned Pydantic contracts, bounded sequential engine |
+| Frontend | React 19, TypeScript, Vite, Tailwind CSS, React Router |
+| Containers | Docker and Docker Compose, Nginx |
+| Quality | pytest, Ruff, Vitest, Testing Library, GitHub Actions |
 
-Within `backend/app/agentforge/`, `main.py` creates the FastAPI application,
-`api/routes/` contains versioned HTTP endpoints, and `config/` contains
-environment-backed settings. `database/` and `domain/models/` provide
-PostgreSQL persistence and SQLAlchemy models; `workflow/` contains the bounded
-orchestration engine; and `agents/`, `tools/`, and `providers/` contain their
-respective interfaces and adapters. See [`backend/README.md`](backend/README.md)
-for database setup and migration commands.
+## Repository structure
 
-The frontend source lives under `frontend/src/`: `components/` for reusable UI,
-`pages/` for screens, `api/` for API clients, `theme/` for theme state, and
-`styles/` for global styling.
+```text
+.
+├── backend/             FastAPI package, tests, migrations, Docker configuration
+├── frontend/            React/Vite dashboard and frontend tests
+├── docs/                Product, architecture, roadmap, and threat model
+├── scripts/             Development documentation and utilities
+├── tests/               Reserved cross-package integration test area
+├── .github/workflows/   Backend and frontend CI
+├── .env.example         Placeholder local environment configuration
+└── docker-compose.yml   PostgreSQL, backend, and frontend local stack
+```
 
-## Prerequisites
+## System requirements
 
+- Windows PowerShell, macOS, or Linux
 - Python 3.11 through 3.14
 - [uv](https://docs.astral.sh/uv/)
 - Node.js 22.12 or newer and npm
+- PostgreSQL 16, or Docker Desktop/compatible Docker Engine with Compose
+- Optional: an OpenAI API key only for `PROVIDER_MODE=openai`
 
-Install uv if it is not already available:
+## Local setup
 
-```powershell
-python -m pip install --user uv
-```
+### 1. Configure environment
 
-## Windows PowerShell setup
-
-Run these commands from the repository root:
+From the repository root:
 
 ```powershell
 Copy-Item .env.example .env
-python -m uv --directory backend sync --all-groups
-npm --prefix frontend ci
 ```
 
-The `.env` file contains local runtime configuration. `CORS_ORIGINS` is a JSON
-array of explicitly allowed HTTP(S) origins; leave it empty (`[]`) to disable
-cross-origin access. Configure the database URLs and start PostgreSQL as
-described in [`backend/README.md`](backend/README.md). Do not commit `.env` or
-put real credentials in it when sharing logs or examples.
+Replace placeholder database passwords and secrets before use. Keep the mock provider for offline development:
 
-For an integrated local deployment, set a non-empty `API_ACCESS_TOKEN` and keep
-the separate `SESSION_SIGNING_SECRET`, then run:
+```dotenv
+APP_ENV=development
+LOG_LEVEL=INFO
+CORS_ORIGINS=["http://localhost:5173"]
+VITE_API_BASE_URL=/api/v1
+PROVIDER_MODE=mock
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_TIMEOUT_SECONDS=30
+API_ACCESS_TOKEN=
+SESSION_SIGNING_SECRET=replace-with-a-random-secret-at-least-32-characters
+```
+
+`CORS_ORIGINS` must be a JSON array and must not contain `*`. Never put secrets in `VITE_*` variables.
+
+### 2. Start PostgreSQL
+
+The database-only Compose service is the simplest setup:
 
 ```powershell
-docker compose --env-file .env up --build
+docker compose -f backend/docker-compose.yml --env-file .env up -d
 ```
 
-Open `http://localhost:5173`, sign in with `API_ACCESS_TOKEN`, and verify
-`http://localhost:5173/api/v1/health`. This is a local Compose path, not a
-production deployment. Docker was not available during this milestone, so the
-images and Compose stack require verification on a machine with Docker.
+Alternatively, use an existing PostgreSQL 16 instance and set matching `DATABASE_URL` and `TEST_DATABASE_URL` values in `.env`.
 
-Provider use is opt-in. Keep `PROVIDER_MODE=mock` for deterministic, offline
-operation. To use the OpenAI Planner adapter, set `PROVIDER_MODE=openai` and
-provide `OPENAI_API_KEY` and a long random `API_ACCESS_TOKEN`;
-`OPENAI_MODEL` and `OPENAI_TIMEOUT_SECONDS` have safe defaults. Workflow and
-execution API routes require that bearer token while OpenAI mode is enabled;
-health endpoints remain public. Only the Planner task description is sent to
-OpenAI, and only after explicit workflow start. A `wikipedia_search` tool
-request sends its bounded query to English Wikipedia after start. Neither
-integration accepts arbitrary URLs; do not submit credentials or other
-sensitive data as task/query content. No provider credentials are needed for
-tests.
+### 3. Install dependencies and migrate
 
-## Start the backend
+```powershell
+python -m uv --directory backend sync --all-groups
+npm --prefix frontend ci
+python -m uv --directory backend run alembic upgrade head
+```
 
-From the repository root, start the API with:
+Alembic migrations live in `backend/migrations/versions/`. The test database is separate: create `agentforge_test` before running backend tests if your PostgreSQL instance does not use the Docker initialization scripts.
+
+### 4. Start the backend
 
 ```powershell
 python -m uv --directory backend run uvicorn agentforge.main:app --reload
 ```
 
-The local liveness endpoint is `http://127.0.0.1:8000/api/v1/health` and returns:
+Health endpoints:
 
-```json
-{
-  "status": "ok",
-  "service": "agentforge-api",
-  "version": "v1",
-  "checks": {
-    "liveness": "ok"
-  }
-}
-```
+- `http://127.0.0.1:8000/api/v1/health`
+- `http://127.0.0.1:8000/api/v1/ready`
 
-`GET /api/v1/ready` reports API readiness separately. The application creates
-and disposes its SQLAlchemy engine with the FastAPI lifespan; connections are
-opened when a database session is used.
+### 5. Start the frontend
 
-## Checks
-
-Run the backend tests and lint check:
+In a second terminal:
 
 ```powershell
-python -m uv --directory backend run pytest
+npm --prefix frontend run dev
+```
+
+Open `http://localhost:5173`. The Vite development server proxies `/api` to `http://127.0.0.1:8000`.
+
+## Docker Compose
+
+The root Compose stack builds PostgreSQL, the API, and the dashboard:
+
+```powershell
+Copy-Item .env.example .env
+# Set POSTGRES_PASSWORD, API_ACCESS_TOKEN, and SESSION_SIGNING_SECRET
+docker compose --env-file .env up --build
+```
+
+Open `http://localhost:5173`. The Compose path is for local development and verification, not production deployment.
+
+Docker was not available while preparing this release documentation. Verify the stack on a machine with Docker before presenting it as a deployment result.
+
+## Provider and tool behavior
+
+- `PROVIDER_MODE=mock` is the default and requires no external credentials.
+- `PROVIDER_MODE=openai` requires `OPENAI_API_KEY` and a protected API with `API_ACCESS_TOKEN` of at least 32 characters.
+- OpenAI mode sends only the Planner task description to the configured provider.
+- Wikipedia search sends only a 1-200 character query to the fixed English Wikipedia API endpoint after execution starts.
+- The registered mock tools are text analysis, JSON inspection, calculator, and Wikipedia search.
+- Planning and workflow review do not invoke tools.
+
+Do not submit credentials or sensitive content as tasks, workflow inputs, or tool arguments.
+
+## Testing
+
+Backend:
+
+```powershell
 python -m uv --directory backend run ruff check .
+python -m uv --directory backend run pytest
 ```
 
-Run the frontend tests, type check, and production build:
+Frontend:
 
 ```powershell
-
-The frontend uses `VITE_API_BASE_URL=/api/v1` by default. Keep this relative
-value when Nginx or another reverse proxy serves the UI and forwards `/api` to
-the backend. Only set an absolute value for a separately hosted API, and never
-put secrets in `VITE_*` variables.powershell
 npm --prefix frontend test
 npm --prefix frontend run typecheck
 npm --prefix frontend run build
 ```
 
-## Dependency management
+GitHub Actions runs backend tests on Python 3.11 and 3.14, plus frontend tests, typechecking, and production build. Backend persistence tests require PostgreSQL.
 
-- Python dependencies are declared in `backend/pyproject.toml` with bounded
-  compatible version ranges and resolved in the committed `backend/uv.lock`.
-  Use `python -m uv --directory backend sync --all-groups` to install the
-  locked application and development dependencies.
-- Frontend dependency versions are recorded in `frontend/package-lock.json`.
-  Use `npm --prefix frontend ci` for a reproducible install; update
-  dependencies with npm and commit both the manifest and lockfile.
+## Screenshots
 
-## Licensing
+Current repository screenshots are not available.
 
-No license has been selected. The root [`LICENSE`](LICENSE) records that no
-license grant is made while the maintainers decide. Do not assume the code is
-available for reuse or distribution; replace the notice with the approved
-license before making such a grant.
+- [ ] Add an application dashboard screenshot at `docs/images/dashboard.png`.
+- [ ] Add a workflow preparation and plan screenshot at `docs/images/workflows.png`.
+- [ ] Add an execution detail, approval, and graph screenshot at `docs/images/execution-approvals.png`.
+
+Only add screenshots created from a real local run; do not fabricate demo data or deployment metrics.
+
+## Current limitations
+
+- Mock mode remains deterministic, while OpenAI-generated planning content is not reproducible.
+- The in-process engine does not rehydrate or resume active executions after an API restart.
+- There is no distributed worker, scheduling service, or exactly-once external side-effect guarantee.
+- Browser sessions use a process-local registry and do not support logout revocation across multiple API workers.
+- Authentication is shared-operator credential/session authentication, not per-person identity, MFA, or RBAC.
+- No general-purpose shell, file, browser, code-evaluation, or arbitrary network tool is implemented.
+- Wikipedia is the only external network tool and is read-only.
+- Raw task and tool arguments are intentionally restricted in safe frontend projections.
+- No backups, monitoring, metrics platform, retention automation, or production deployment has been implemented or verified.
+- The repository has no selected open-source license.
+
+## Roadmap
+
+The next work should remain milestone-gated:
+
+1. Verify and harden private deployment, backups, recovery, monitoring, transport security, and container security.
+2. Resolve process-local session limitations before multi-worker or replica support.
+3. Add real side-effect tools only with typed schemas, policy review, idempotency contracts, and focused tests.
+4. Add controlled parallelism and distributed claims only after crash/recovery semantics are implemented.
+5. Add multi-user identity and authorization only after the threat model is redesigned.
+
+See [Roadmap](docs/ROADMAP.md) for milestone details.
+
+## Security considerations
+
+- Treat task text, provider output, and tool output as untrusted.
+- Keep workflow fields declarative; the engine never interprets them as code or shell commands.
+- Registration, capability checks, typed schemas, and approval binding are enforced server-side.
+- Production requires HTTPS, explicit HTTPS CORS origins, strong operator and session secrets, and same-origin API routing.
+- Approval waits and action arguments are persisted; changed arguments cannot reuse an existing grant.
+- OpenAI and Wikipedia integrations share no arbitrary URL or credentials mechanism.
+- Run a dependency and container review before public exposure.
+- A complete security review is documented in [Threat Model](docs/THREAT_MODEL.md).
+
+## Contributing
+
+Before changing behavior:
+
+1. Read the product specification and architecture documents.
+2. Preserve deny-by-default tool policy and explicit execution approval.
+3. Add focused backend/frontend tests for introduced behavior.
+4. Run backend lint/tests and frontend tests/typecheck/build.
+5. Run `git diff --check`.
+
+## License
+
+No license has been selected. [LICENSE](LICENSE) reserves all rights and grants no reuse or distribution permission. Do not claim the project is open source until maintainers add an approved license.
