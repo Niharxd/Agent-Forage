@@ -1,4 +1,6 @@
-const authUrl = "/api/v1/auth/session";
+import { apiBaseUrl } from "./config";
+
+const authUrl = `${apiBaseUrl}/auth/session`;
 
 export async function restoreSession(): Promise<boolean> {
   const response = await fetch(authUrl, { credentials: "include", headers: { Accept: "application/json" } });

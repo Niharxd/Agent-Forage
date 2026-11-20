@@ -38,10 +38,17 @@ npm run typecheck
 npm run test
 ```
 
+The production image is built with `Dockerfile` and served by Nginx using
+`nginx.conf`. The Nginx configuration serves the SPA fallback and proxies
+`/api` to the Compose backend service. Build-time `VITE_API_BASE_URL` defaults
+to `/api/v1`; it must remain relative for this same-origin setup.
+
 ## API integration and operator authentication
 
-The frontend calls the same-origin `/api/v1` routes. Vite proxies `/api` to
-`http://127.0.0.1:8000` during local development. The UI uses persisted
+The frontend calls the configurable `VITE_API_BASE_URL` (default
+`/api/v1`). Vite proxies `/api` to `http://127.0.0.1:8000` during local
+development. A deployed same-origin frontend should keep the relative default
+and route `/api` to FastAPI through its reverse proxy. The UI uses persisted
 workflow and execution APIs for workflow preparation, workflow listing,
 execution history, details, start, cancellation, and approval visibility.
 
@@ -83,6 +90,11 @@ and Vite 7.x and 8.x retain the same dependency range. npm's suggested Vite
 both npm audit commands when Vite, tinyglobby, fdir, or picomatch releases
 change; do not add an override unless a published patched version passes the
 frontend test, typecheck, and build checks.
+
+To point a separately hosted frontend at an API, set `VITE_API_BASE_URL` at
+build time (for example, `https://api.example.invalid/api/v1`). This value is
+public browser configuration; never put credentials or tokens in `VITE_*`
+variables.
 
 ## Theme implementation
 

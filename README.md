@@ -61,6 +61,18 @@ cross-origin access. Configure the database URLs and start PostgreSQL as
 described in [`backend/README.md`](backend/README.md). Do not commit `.env` or
 put real credentials in it when sharing logs or examples.
 
+For an integrated local deployment, set a non-empty `API_ACCESS_TOKEN` and keep
+the separate `SESSION_SIGNING_SECRET`, then run:
+
+```powershell
+docker compose --env-file .env up --build
+```
+
+Open `http://localhost:5173`, sign in with `API_ACCESS_TOKEN`, and verify
+`http://localhost:5173/api/v1/health`. This is a local Compose path, not a
+production deployment. Docker was not available during this milestone, so the
+images and Compose stack require verification on a machine with Docker.
+
 Provider use is opt-in. Keep `PROVIDER_MODE=mock` for deterministic, offline
 operation. To use the OpenAI Planner adapter, set `PROVIDER_MODE=openai` and
 provide `OPENAI_API_KEY` and a long random `API_ACCESS_TOKEN`;
@@ -110,6 +122,11 @@ python -m uv --directory backend run ruff check .
 Run the frontend tests, type check, and production build:
 
 ```powershell
+
+The frontend uses `VITE_API_BASE_URL=/api/v1` by default. Keep this relative
+value when Nginx or another reverse proxy serves the UI and forwards `/api` to
+the backend. Only set an absolute value for a separately hosted API, and never
+put secrets in `VITE_*` variables.powershell
 npm --prefix frontend test
 npm --prefix frontend run typecheck
 npm --prefix frontend run build

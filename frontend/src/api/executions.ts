@@ -1,3 +1,5 @@
+import { apiBaseUrl } from "./config";
+
 export type ExecutionStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
 export type ExecutionTaskResult = {
@@ -60,8 +62,6 @@ export type ExecutionListFilters = {
   status: ExecutionStatus | undefined;
   search: string;
 };
-
-const apiBaseUrl = "/api/v1";
 
 export type WorkflowRecord = {
   id: string;

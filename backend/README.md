@@ -66,6 +66,24 @@ docker compose --env-file .env -f backend/docker-compose.yml up -d db
 docker compose --env-file .env -f backend/docker-compose.yml ps
 ```
 
+The repository-root `docker-compose.yml` additionally builds the backend and
+Nginx-served frontend, applies migrations before starting the API, waits for
+database/API health checks, and persists PostgreSQL in a named volume:
+
+```powershell
+docker compose --env-file .env up --build
+```
+
+Set a non-empty `API_ACCESS_TOKEN` before using this integrated path. Open
+`http://localhost:5173`; the frontend keeps the default relative
+`VITE_API_BASE_URL=/api/v1` and the frontend container proxies `/api` to the
+backend. Stop it with `Ctrl+C`, or use `docker compose down` (add `-v` only
+when intentionally deleting the database volume). The integrated stack is
+intended for local/private use; production requires HTTPS termination, a
+secret manager, backups, image scanning, and a reviewed deployment target.
+Docker was unavailable during this milestone, so container startup and Compose
+health checks still need verification on a Docker-enabled host.
+
 If a PostgreSQL instance is already available, create an isolated test
 database named `agentforge_test` owned by the application role. Do not point
 the test URL at the development or production database.
@@ -241,6 +259,10 @@ side-effect outcome may be ambiguous and must not be automatically retried.
 The Vite development server proxies `/api` to `http://127.0.0.1:8000`. Run the
 backend on that address while using the live execution history screen. A
 deployed frontend must route `/api` to the backend on the same origin.
+
+For a separately hosted frontend, set `VITE_API_BASE_URL` at build time. The
+default relative path is preferred for same-origin deployments and avoids
+embedding an environment-specific API hostname in the bundle.
 
 Known testing limitations: planner/provider tests use the deterministic mock
 provider and registered fake tools; no test calls an external LLM or network
