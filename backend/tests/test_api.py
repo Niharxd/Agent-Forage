@@ -34,6 +34,28 @@ def test_readiness_is_separate_from_liveness() -> None:
     assert response.json()["checks"] == {"application": "ready"}
 
 
+def test_readiness_returns_503_when_database_is_unavailable() -> None:
+    application = make_test_app()
+
+    def unavailable_session_factory() -> object:
+        raise RuntimeError("postgresql://user:secret@internal-host:5432/protected")
+
+    with TestClient(application) as client:
+        application.state.session_factory = unavailable_session_factory
+        response = client.get("/api/v1/ready")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "request_error",
+            "message": "The request could not be processed.",
+            "details": [],
+        }
+    }
+    assert "postgresql://" not in response.text
+    assert "secret" not in response.text
+
+
 def test_settings_load_environment_and_validate_cors_origins(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

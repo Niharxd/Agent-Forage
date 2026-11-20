@@ -63,7 +63,6 @@ def configure_logging(log_level: str) -> None:
         level=log_level,
         format="%(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S%z",
-        force=True,
     )
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)

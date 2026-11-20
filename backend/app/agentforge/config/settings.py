@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     api_access_token: SecretStr | None = None
     session_signing_secret: SecretStr | None = None
     operator_session_ttl_seconds: int = Field(default=1800, ge=300, le=86400)
-    database_url: str = "postgresql+psycopg://localhost/agentforge"
-    test_database_url: str = "postgresql+psycopg://localhost/agentforge_test"
+    database_url: str = "postgresql+psycopg://agentforge@localhost/agentforge"
+    test_database_url: str = "postgresql+psycopg://agentforge@localhost/agentforge_test"
     workflow_max_tasks: int = Field(default=25, ge=1, le=25)
     workflow_max_execution_steps: int = Field(default=25, ge=1, le=25)
     workflow_max_task_input_bytes: int = Field(default=10_000, ge=1, le=10_000)

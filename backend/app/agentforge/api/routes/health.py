@@ -2,8 +2,9 @@
 
 from typing import Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy import text
 
 router = APIRouter()
 
@@ -22,6 +23,15 @@ def get_health() -> HealthResponse:
 
 
 @router.get("/ready", response_model=HealthResponse, tags=["health"])
-def get_readiness() -> HealthResponse:
-    """Report API readiness; no external dependencies are initialized yet."""
+def get_readiness(request: Request) -> HealthResponse:
+    """Report readiness only when the application database responds."""
+    try:
+        session_factory = request.app.state.session_factory
+        with session_factory() as session:
+            session.execute(text("SELECT 1"))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Database readiness check failed",
+        ) from exc
     return HealthResponse(status="ready", checks={"application": "ready"})
