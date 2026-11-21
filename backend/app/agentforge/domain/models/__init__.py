@@ -10,6 +10,7 @@ from agentforge.domain.models.execution import (
 )
 from agentforge.domain.models.user import User
 from agentforge.domain.models.workflow import Workflow
+from agentforge.domain.models.workspace import Workspace, WorkspaceMembership
 
 __all__ = [
     "ApprovalRequest",
@@ -18,6 +19,8 @@ __all__ = [
     "ExecutionStep",
     "ToolExecutionRecord",
     "User",
+    "Workspace",
+    "WorkspaceMembership",
     "Workflow",
     "WorkflowExecution",
 ]

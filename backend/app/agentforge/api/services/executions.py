@@ -12,6 +12,7 @@ from agentforge.domain.models import (
     ExecutionEvent,
     ExecutionStep,
     WorkflowExecution,
+    Workspace,
 )
 from agentforge.domain.models.workflow import Workflow
 from agentforge.domain.workflows.models import (
@@ -93,6 +94,8 @@ class ExecutionRepository:
             record = WorkflowExecution(
                 id=snapshot.execution_id,
                 workflow_id=workflow_id,
+                workspace_id=workflow.workspace_id,
+                created_by_user_id=workflow.created_by_user_id,
                 original_task=(
                     original_task
                     if original_task is not None
@@ -371,7 +374,13 @@ class ExecutionRepository:
         search: str | None = None,
     ) -> tuple[list[WorkflowExecutionSnapshot], int]:
         """Return filtered persisted executions in newest-first paginated order."""
+        legacy_workspace = self._session.scalar(
+            select(Workspace).where(Workspace.slug == "legacy-operator")
+        )
+        if legacy_workspace is None:
+            return [], 0
         filters = [WorkflowExecution.status.in_(_API_WORKFLOW_STATUSES)]
+        filters.append(WorkflowExecution.workspace_id == legacy_workspace.id)
         if status is not None:
             filters.append(WorkflowExecution.status == status.value)
         if search and search.strip():
@@ -413,6 +422,11 @@ class ExecutionRepository:
         return [self._snapshot(record) for record in records], total
 
     def _load_execution(self, execution_id: UUID) -> WorkflowExecution | None:
+        legacy_workspace = self._session.scalar(
+            select(Workspace).where(Workspace.slug == "legacy-operator")
+        )
+        if legacy_workspace is None:
+            return None
         return self._session.scalar(
             select(WorkflowExecution)
             .options(
@@ -420,7 +434,10 @@ class ExecutionRepository:
                 selectinload(WorkflowExecution.steps),
                 selectinload(WorkflowExecution.events),
             )
-            .where(WorkflowExecution.id == execution_id)
+            .where(
+                WorkflowExecution.id == execution_id,
+                WorkflowExecution.workspace_id == legacy_workspace.id,
+            )
         )
 
     def _insert_events(

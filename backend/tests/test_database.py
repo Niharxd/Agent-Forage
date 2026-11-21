@@ -23,6 +23,8 @@ from agentforge.domain.models import (
     User,
     Workflow,
     WorkflowExecution,
+    Workspace,
+    WorkspaceMembership,
 )
 from agentforge.domain.workflows.models import (
     TaskStatus,
@@ -113,6 +115,32 @@ def db_session(migrated_database: Engine) -> Iterator[Session]:
         session.rollback()
 
 
+def _legacy_workspace(session: Session) -> Workspace:
+    workspace = session.scalar(select(Workspace).where(Workspace.slug == "legacy-operator"))
+    if workspace is None:
+        raise AssertionError("The migration did not create the legacy workspace.")
+    return workspace
+
+
+def test_legacy_workspace_is_created_for_existing_operator_compatibility(
+    db_session: Session,
+) -> None:
+    legacy = _legacy_workspace(db_session)
+    owner = db_session.get(User, legacy.owner_id)
+
+    assert owner is not None
+    assert owner.account_status == "active"
+    assert legacy.name == "Legacy Operator Workspace"
+    membership = db_session.scalar(
+        select(WorkspaceMembership).where(
+            WorkspaceMembership.workspace_id == legacy.id,
+            WorkspaceMembership.user_id == owner.id,
+        )
+    )
+    assert membership is not None
+    assert membership.role == "owner"
+
+
 def test_settings_select_test_database_and_reject_non_postgresql_urls() -> None:
     settings = Settings(
         _env_file=None,
@@ -143,15 +171,21 @@ def test_settings_load_database_urls_from_environment(monkeypatch: pytest.Monkey
 def test_model_relationships_persist_and_timestamp_fields_are_populated(
     db_session: Session,
 ) -> None:
+    legacy_workspace = _legacy_workspace(db_session)
     workflow = Workflow(
         name="research",
         workflow_definition={"schema_version": 1, "steps": []},
         version=1,
+        workspace=legacy_workspace,
+        created_by=legacy_workspace.owner,
+        updated_by=legacy_workspace.owner,
     )
     execution = WorkflowExecution(
         original_task="Research a topic",
         status="submitted",
         workflow=workflow,
+        workspace=legacy_workspace,
+        created_by=legacy_workspace.owner,
     )
     step = ExecutionStep(
         task_id="research-1",
@@ -364,20 +398,177 @@ def test_prepare_route_survives_postcommit_refresh_failure_and_registers_executi
 
 
 def test_user_email_and_workflow_version_are_unique(db_session: Session) -> None:
-    db_session.add(User(email="operator@example.invalid"))
+    db_session.add(User(email="  OPERATOR@EXAMPLE.INVALID "))
     db_session.flush()
+    user = db_session.scalar(select(User).where(User.email == "operator@example.invalid"))
+    assert user is not None
+    assert user.account_status == "pending"
 
     db_session.add(User(email="operator@example.invalid"))
     with pytest.raises(IntegrityError):
         db_session.flush()
     db_session.rollback()
 
-    db_session.add(Workflow(name="unique-workflow", workflow_definition={}, version=1))
+    legacy_workspace = _legacy_workspace(db_session)
+    db_session.add(
+        Workflow(
+            name="unique-workflow",
+            workflow_definition={},
+            version=1,
+            workspace=legacy_workspace,
+        )
+    )
     db_session.flush()
-    db_session.add(Workflow(name="unique-workflow", workflow_definition={}, version=1))
+    db_session.add(
+        Workflow(
+            name="unique-workflow",
+            workflow_definition={},
+            version=1,
+            workspace=legacy_workspace,
+        )
+    )
     with pytest.raises(IntegrityError):
         db_session.flush()
     db_session.rollback()
+
+
+def test_workspace_membership_and_user_models(db_session: Session) -> None:
+    owner = User(
+        email="  Owner@Example.Invalid ",
+        password_hash="not-a-plaintext-password",
+        account_status="active",
+    )
+    db_session.add(owner)
+    db_session.flush()
+
+    assert owner.email == "owner@example.invalid"
+    workspace = Workspace(name="Private Workspace", slug="private-workspace", owner=owner)
+    db_session.add(workspace)
+    db_session.flush()
+
+    membership = WorkspaceMembership(
+        workspace=workspace,
+        user=owner,
+        role="owner",
+    )
+    db_session.add(membership)
+    db_session.flush()
+
+    assert membership.workspace_id == workspace.id
+    assert membership.user_id == owner.id
+
+
+def test_workspace_membership_constraints(db_session: Session) -> None:
+    owner = User(email="membership-owner@example.invalid", account_status="active")
+    member = User(email="membership-member@example.invalid", account_status="active")
+    workspace = Workspace(name="Membership Test", slug="membership-test", owner=owner)
+    db_session.add_all([owner, member, workspace])
+    db_session.flush()
+
+    db_session.add(WorkspaceMembership(workspace=workspace, user=member, role="owner"))
+    db_session.flush()
+    db_session.add(WorkspaceMembership(workspace=workspace, user=member, role="member"))
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+    db_session.rollback()
+
+    invalid_owner = User(email="invalid-role-owner@example.invalid", account_status="active")
+    invalid_member = User(email="invalid-role-member@example.invalid", account_status="active")
+    workspace = Workspace(
+        name="Invalid Role",
+        slug="invalid-role",
+        owner=invalid_owner,
+    )
+    db_session.add_all([invalid_owner, invalid_member, workspace])
+    db_session.flush()
+    db_session.add(
+        WorkspaceMembership(
+            workspace=workspace,
+            user=invalid_member,
+            role="superuser",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+    db_session.rollback()
+
+
+def test_workflow_names_are_unique_only_within_a_workspace(db_session: Session) -> None:
+    owner = User(email="workspace-owner@example.invalid", account_status="active")
+    db_session.add(owner)
+    db_session.flush()
+    workspace_a = Workspace(name="Workspace A", slug="workspace-a", owner=owner)
+    workspace_b = Workspace(name="Workspace B", slug="workspace-b", owner=owner)
+    db_session.add_all([workspace_a, workspace_b])
+    db_session.flush()
+
+    db_session.add(
+        Workflow(
+            name="shared-name",
+            workflow_definition={},
+            version=1,
+            workspace=workspace_a,
+            created_by=owner,
+            updated_by=owner,
+        )
+    )
+    db_session.flush()
+    db_session.add(
+        Workflow(
+            name="shared-name",
+            workflow_definition={},
+            version=1,
+            workspace=workspace_b,
+            created_by=owner,
+            updated_by=owner,
+        )
+    )
+    db_session.flush()
+
+    db_session.add(
+        Workflow(
+            name="shared-name",
+            workflow_definition={},
+            version=1,
+            workspace=workspace_a,
+            created_by=owner,
+            updated_by=owner,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+    db_session.rollback()
+
+
+def test_execution_inherits_and_preserves_workspace_ownership(db_session: Session) -> None:
+    owner = User(email="execution-owner@example.invalid", account_status="active")
+    db_session.add(owner)
+    db_session.flush()
+    workspace = Workspace(name="Execution Workspace", slug="execution-workspace", owner=owner)
+    db_session.add(workspace)
+    db_session.flush()
+    workflow = Workflow(
+        name="owned-workflow",
+        workflow_definition={},
+        version=1,
+        workspace=workspace,
+        created_by=owner,
+        updated_by=owner,
+    )
+    db_session.add(workflow)
+    db_session.flush()
+    execution = WorkflowExecution(
+        workflow=workflow,
+        workspace=workspace,
+        created_by=owner,
+        original_task="Owned task",
+        status="pending",
+    )
+    db_session.add(execution)
+    db_session.flush()
+
+    assert execution.workspace_id == workflow.workspace_id
+    assert execution.created_by_user_id == owner.id
 
 
 def test_invalid_execution_reference_is_rejected_by_foreign_key(
@@ -411,8 +602,13 @@ def test_transaction_rollback_removes_uncommitted_record(
 
 
 def test_execution_events_cannot_be_updated_or_deleted(db_session: Session) -> None:
+    legacy_workspace = _legacy_workspace(db_session)
     event = ExecutionEvent(
-        execution=WorkflowExecution(original_task="Audit this", status="submitted"),
+        execution=WorkflowExecution(
+            original_task="Audit this",
+            status="submitted",
+            workspace=legacy_workspace,
+        ),
         event_type="execution_submitted",
         to_status="submitted",
     )
@@ -506,17 +702,84 @@ def test_migration_metadata_matches_current_schema_and_supports_rollback(
         connection.commit()
 
 
+def test_upgrade_backfills_existing_workflow_and_execution_to_legacy_workspace(
+    migrated_database: Engine,
+) -> None:
+    with migrated_database.begin() as connection:
+        command.downgrade(_alembic_config(connection), "7f2c9b1e4a6d")
+
+    workflow_id = uuid4()
+    execution_id = uuid4()
+    with migrated_database.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO workflows (
+                    id, name, workflow_definition, version,
+                    created_at, updated_at
+                )
+                VALUES (
+                    :workflow_id,
+                    'existing-legacy-workflow',
+                    '{}'::jsonb,
+                    1,
+                    now(),
+                    now()
+                )
+                """
+            ),
+            {"workflow_id": workflow_id},
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO workflow_executions (
+                    id, workflow_id, original_task, status, created_at
+                )
+                VALUES (
+                    :execution_id,
+                    :workflow_id,
+                    'Existing legacy execution',
+                    'pending',
+                    now()
+                )
+                """
+            ),
+            {"execution_id": execution_id, "workflow_id": workflow_id},
+        )
+
+    with migrated_database.begin() as connection:
+        command.upgrade(_alembic_config(connection), "head")
+
+    with Session(migrated_database) as session:
+        legacy = _legacy_workspace(session)
+        workflow = session.get(Workflow, workflow_id)
+        execution = session.get(WorkflowExecution, execution_id)
+        assert workflow is not None
+        assert execution is not None
+        assert workflow.workspace_id == legacy.id
+        assert workflow.created_by_user_id == legacy.owner_id
+        assert workflow.updated_by_user_id == legacy.owner_id
+        assert execution.workspace_id == legacy.id
+        assert execution.workflow_id == workflow.id
+        assert execution.created_by_user_id == legacy.owner_id
+
+
 def _create_persisted_execution(
     session: Session,
     *,
     definition: WorkflowDefinition,
     engine: WorkflowEngine | None = None,
 ) -> tuple[Workflow, WorkflowEngine, ExecutionRepository, WorkflowExecutionSnapshot]:
+    legacy_workspace = _legacy_workspace(session)
     workflow = Workflow(
         name=f"execution-test-{uuid4().hex}",
         description="A persisted workflow.",
         workflow_definition=definition.model_dump(mode="json"),
         version=1,
+        workspace=legacy_workspace,
+        created_by=legacy_workspace.owner,
+        updated_by=legacy_workspace.owner,
     )
     session.add(workflow)
     session.commit()
@@ -788,10 +1051,12 @@ def test_initial_execution_transaction_rolls_back_all_rows_on_commit_failure(
 ) -> None:
     definition = _one_task_definition()
     with Session(migrated_database) as session:
+        legacy_workspace = _legacy_workspace(session)
         workflow = Workflow(
             name=f"rollback-{uuid4().hex}",
             workflow_definition=definition.model_dump(mode="json"),
             version=1,
+            workspace=legacy_workspace,
         )
         session.add(workflow)
         session.commit()
@@ -1006,16 +1271,19 @@ def _approval_tool_registry() -> ToolRegistry:
 
 def _create_minimal_execution(session: Session) -> UUID:
     """Create a minimal workflow execution and return its ID."""
+    legacy_workspace = _legacy_workspace(session)
     workflow = Workflow(
         name=f"wf-{uuid4().hex}",
         description="Minimal workflow for approval tests.",
         workflow_definition={"schema_version": 1, "steps": []},
         version=1,
+        workspace=legacy_workspace,
     )
     session.add(workflow)
     session.flush()
     execution = WorkflowExecution(
         workflow_id=workflow.id,
+        workspace_id=legacy_workspace.id,
         original_task="Test task",
         status="pending",
     )
@@ -1232,11 +1500,13 @@ def test_engine_persists_approval_request_through_repository(
     )
 
     with Session(migrated_database) as session:
+        legacy_workspace = _legacy_workspace(session)
         workflow = Workflow(
             name=f"approval-test-{uuid4().hex}",
             description="Approval persistence test.",
             workflow_definition=definition.model_dump(mode="json"),
             version=1,
+            workspace=legacy_workspace,
         )
         session.add(workflow)
         session.commit()
@@ -1314,11 +1584,13 @@ def test_engine_does_not_authorize_when_approval_commit_fails(
         ],
     )
     with Session(migrated_database) as session:
+        legacy_workspace = _legacy_workspace(session)
         workflow = Workflow(
             name=f"approval-failure-{uuid4().hex}",
             description="Approval transaction failure test.",
             workflow_definition=definition.model_dump(mode="json"),
             version=1,
+            workspace=legacy_workspace,
         )
         session.add(workflow)
         session.commit()

@@ -8,6 +8,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     SmallInteger,
     String,
@@ -23,7 +24,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from agentforge.database.base import Base
 
 if TYPE_CHECKING:
+    from agentforge.domain.models.user import User
     from agentforge.domain.models.workflow import Workflow
+    from agentforge.domain.models.workspace import Workspace
 
 
 class WorkflowExecution(Base):
@@ -31,6 +34,12 @@ class WorkflowExecution(Base):
 
     __tablename__ = "workflow_executions"
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "workflow_id"],
+            ["workflows.workspace_id", "workflows.id"],
+            ondelete="RESTRICT",
+            name="fk_workflow_executions_workspace_workflow",
+        ),
         CheckConstraint(
             "status IN ('submitted', 'planning', 'planned', 'queued', 'running', "
             "'waiting_approval', 'succeeded', 'failed', 'cancelled', 'pending', 'completed')",
@@ -58,6 +67,27 @@ class WorkflowExecution(Base):
         ForeignKey("workflows.id", ondelete="RESTRICT"),
         index=True,
     )
+    workspace_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+    )
+    started_by_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+    )
+    cancelled_by_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+    )
     original_task: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="submitted")
     plan_version: Mapped[int | None] = mapped_column(Integer)
@@ -72,7 +102,23 @@ class WorkflowExecution(Base):
         server_default=func.now(),
     )
 
-    workflow: Mapped["Workflow | None"] = relationship(back_populates="executions")
+    workspace: Mapped["Workspace"] = relationship(
+        back_populates="executions",
+        foreign_keys=[workspace_id],
+    )
+    created_by: Mapped["User | None"] = relationship(
+        foreign_keys=[created_by_user_id],
+    )
+    started_by: Mapped["User | None"] = relationship(
+        foreign_keys=[started_by_user_id],
+    )
+    cancelled_by: Mapped["User | None"] = relationship(
+        foreign_keys=[cancelled_by_user_id],
+    )
+    workflow: Mapped["Workflow | None"] = relationship(
+        back_populates="executions",
+        foreign_keys=[workflow_id],
+    )
     steps: Mapped[list["ExecutionStep"]] = relationship(
         back_populates="execution",
         cascade="all, delete-orphan",
