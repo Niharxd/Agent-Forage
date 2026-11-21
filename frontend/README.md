@@ -45,10 +45,11 @@ to `/api/v1`; it must remain relative for this same-origin setup.
 
 ## API integration and operator authentication
 
-The frontend calls the configurable `VITE_API_BASE_URL` (default
-`/api/v1`). Vite proxies `/api` to `http://127.0.0.1:8000` during local
-development. A deployed same-origin frontend should keep the relative default
-and route `/api` to FastAPI through its reverse proxy. The UI uses persisted
+The frontend calls the configurable `VITE_API_BASE_URL` in local and
+non-production builds (default `/api/v1`). Production builds always use
+`/api/v1` so browser requests stay same-origin. Vite proxies `/api` to
+`http://127.0.0.1:8000` during local development. The Vercel deployment uses
+`frontend/vercel.json` to rewrite `/api/v1/*` to the Render API. The UI uses persisted
 workflow and execution APIs for workflow preparation, workflow listing,
 execution history, details, start, cancellation, and approval visibility.
 
