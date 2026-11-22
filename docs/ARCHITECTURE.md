@@ -15,6 +15,24 @@ process memory to support logout revocation. Restart clears all sessions;
 multiple API processes do not share session state and are not supported by this
 interim mechanism.
 
+### Public-user persistent sessions
+
+Public-user login creates a cryptographically random opaque session ID, signs
+it into the existing 30-minute HttpOnly browser cookie, and stores only a
+SHA-256 hash of the opaque ID in PostgreSQL. The database session record also
+stores the user foreign key, UTC creation/expiry timestamps, and an optional
+UTC revocation timestamp. Login adds the session and updates `last_login_at`
+before a single transaction commit; a database failure is returned as an
+authentication-unavailable response and no valid cookie is issued.
+
+The reusable authenticated-user dependency verifies the HMAC signature, expiry,
+database record, revocation state, user existence, and account status. It
+rejects suspended and deleted users and fails closed on database errors.
+Logout revokes the current database record and clears the `/api/v1`
+`HttpOnly` cookie. Revocation and expiry remain authoritative across backend
+restarts and do not depend on application process memory. The operator session
+mechanism remains separate and process-local.
+
 Cookie sessions are accepted by protected workflow and execution routers and
 the approval listing/review endpoints. Every cookie-authenticated
 state-changing request, login, and logout requires an exact configured Origin.

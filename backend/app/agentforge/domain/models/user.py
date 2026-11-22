@@ -8,6 +8,7 @@ from sqlalchemy import CheckConstraint, DateTime, String, Uuid, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 if TYPE_CHECKING:
+    from agentforge.domain.models.user_session import UserSession
     from agentforge.domain.models.workspace import Workspace, WorkspaceMembership
 
 from agentforge.database.base import Base
@@ -48,6 +49,11 @@ class User(TimestampMixin, Base):
         foreign_keys="Workspace.owner_id",
     )
     workspace_memberships: Mapped[list["WorkspaceMembership"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    user_sessions: Mapped[list["UserSession"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,

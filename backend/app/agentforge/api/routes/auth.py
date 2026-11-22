@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, SecretStr
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from agentforge.api.auth import (
@@ -21,6 +21,7 @@ from agentforge.api.auth import (
     secure_compare,
     validate_browser_origin,
 )
+from agentforge.api.dependencies import require_authenticated_user
 from agentforge.api.schemas import (
     LoginRequest,
     LoginResponse,
@@ -147,7 +148,13 @@ def user_login(
     """Authenticate a user without exposing account existence in failures."""
     validate_browser_origin(request)
     check_login_rate_limit(request, scope="user")
-    user = session.scalar(select(User).where(User.email == body.email))
+    try:
+        user = session.scalar(select(User).where(User.email == body.email))
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="User authentication is unavailable.",
+        ) from exc
     password_valid = verify_password(body.password, user.password_hash if user else None)
     if user is None or user.account_status in {"suspended", "deleted"} or not password_valid:
         record_login_failure(request, scope="user")
@@ -155,8 +162,18 @@ def user_login(
 
     clear_login_failures(request, scope="user")
     user.last_login_at = datetime.now(UTC)
-    session.commit()
-    token, expires_at = create_user_session(request, user.id)
+    try:
+        token, expires_at = create_user_session(request, session, user.id)
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except SQLAlchemyError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="User authentication is unavailable.",
+        ) from exc
     settings = request.app.state.settings
     response.set_cookie(
         USER_SESSION_COOKIE,
@@ -171,10 +188,21 @@ def user_login(
 
 
 @router.delete("/logout", status_code=204)
-def user_logout(request: Request, response: Response) -> Response:
+def user_logout(
+    request: Request,
+    response: Response,
+    session: Session = Depends(get_db_session),
+) -> Response:
     """Revoke the current public-user browser session."""
     validate_browser_origin(request)
-    revoke_user_session(request)
+    try:
+        revoke_user_session(request, session)
+    except SQLAlchemyError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="User authentication is unavailable.",
+        ) from exc
     response.delete_cookie(
         USER_SESSION_COOKIE,
         path="/api/v1",
@@ -184,3 +212,11 @@ def user_logout(request: Request, response: Response) -> Response:
     )
     response.status_code = 204
     return response
+
+
+@router.get("/user-session", response_model=UserResponse)
+def user_session_status(
+    user: User = Depends(require_authenticated_user),
+) -> UserResponse:
+    """Return the identity established by the persistent public-user cookie."""
+    return UserResponse.model_validate(user)

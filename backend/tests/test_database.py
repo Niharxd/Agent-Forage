@@ -1,5 +1,8 @@
+import hashlib
 import os
+import secrets
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -10,6 +13,7 @@ from agentforge.api.services.executions import (
     ExecutionRepository,
 )
 from agentforge.api.services.workflows import create_planned_workflow_execution
+from agentforge.api.user_auth import USER_SESSION_COOKIE, hash_password
 from agentforge.config.settings import Settings
 from agentforge.database.dependencies import get_db_session
 from agentforge.database.engine import create_database_engine
@@ -21,6 +25,7 @@ from agentforge.domain.models import (
     ExecutionStep,
     ToolExecutionRecord,
     User,
+    UserSession,
     Workflow,
     WorkflowExecution,
     Workspace,
@@ -682,6 +687,94 @@ def test_workflow_api_persists_versioned_definitions(migrated_database: Engine) 
     with Session(migrated_database) as session:
         records = session.scalars(select(Workflow).where(Workflow.name == workflow_name)).all()
         assert sorted(record.version for record in records) == [1, 2]
+
+
+def test_public_session_survives_real_application_recreation(
+    migrated_database: Engine,
+) -> None:
+    password = "StrongPassword123"
+    with Session(migrated_database) as session:
+        user = User(
+            email=f"restart-{uuid4().hex}@example.com",
+            password_hash=hash_password(password),
+            account_status="active",
+        )
+        session.add(user)
+        session.commit()
+        email = user.email
+
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        cors_origins=["http://localhost:5173"],
+        api_access_token=SecretStr("operator-secret"),
+        session_signing_secret=SecretStr("s" * 40),
+    )
+
+    def db_session_override() -> Iterator[Session]:
+        with Session(migrated_database) as session:
+            yield session
+
+    app_before_restart = create_app(settings)
+    app_before_restart.dependency_overrides[get_db_session] = db_session_override
+    with TestClient(app_before_restart) as client:
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"email": email, "password": password},
+            headers={"Origin": "http://localhost:5173"},
+        )
+        assert login.status_code == 200
+        cookie = client.cookies.get(USER_SESSION_COOKIE)
+        assert cookie
+
+    app_after_restart = create_app(settings)
+    app_after_restart.dependency_overrides[get_db_session] = db_session_override
+    with TestClient(app_after_restart) as client:
+        client.cookies.set(USER_SESSION_COOKIE, cookie)
+        status = client.get("/api/v1/auth/user-session")
+        assert status.status_code == 200
+        assert status.json()["email"] == email
+
+        logout = client.delete(
+            "/api/v1/auth/logout",
+            headers={"Origin": "http://localhost:5173"},
+        )
+        assert logout.status_code == 204
+        client.cookies.set(USER_SESSION_COOKIE, cookie)
+        assert client.get("/api/v1/auth/user-session").status_code == 401
+
+
+def test_persistent_user_session_database_lifecycle(migrated_database: Engine) -> None:
+    with Session(migrated_database) as session:
+        user = User(
+            email=f"session-{uuid4().hex}@example.com",
+            password_hash="not-used",
+            account_status="active",
+        )
+        session.add(user)
+        session.flush()
+        opaque_id = secrets.token_urlsafe(32)
+        record = UserSession(
+            user_id=user.id,
+            session_hash=hashlib.sha256(opaque_id.encode("ascii")).hexdigest(),
+            expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        )
+        session.add(record)
+        session.commit()
+        record_id = record.id
+
+    with Session(migrated_database) as session:
+        stored = session.get(UserSession, record_id)
+        assert stored is not None
+        assert stored.user_id is not None
+        assert stored.revoked_at is None
+        stored.revoked_at = datetime.now(UTC)
+        session.commit()
+
+    with Session(migrated_database) as session:
+        stored = session.get(UserSession, record_id)
+        assert stored is not None
+        assert stored.revoked_at is not None
 
 
 def test_migration_metadata_matches_current_schema_and_supports_rollback(

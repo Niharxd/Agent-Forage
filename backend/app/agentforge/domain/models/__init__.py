@@ -9,6 +9,7 @@ from agentforge.domain.models.execution import (
     WorkflowExecution,
 )
 from agentforge.domain.models.user import User
+from agentforge.domain.models.user_session import UserSession
 from agentforge.domain.models.workflow import Workflow
 from agentforge.domain.models.workspace import Workspace, WorkspaceMembership
 
@@ -19,6 +20,7 @@ __all__ = [
     "ExecutionStep",
     "ToolExecutionRecord",
     "User",
+    "UserSession",
     "Workspace",
     "WorkspaceMembership",
     "Workflow",

@@ -93,10 +93,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     application.state.settings = app_settings
     application.state.active_sessions = {}
-    application.state.active_user_sessions = {}
     application.state.login_attempts = {}
     application.state.session_lock = RLock()
-    application.state.user_session_lock = RLock()
     application.add_middleware(
         RequestSizeLimitMiddleware,
         max_bytes=1_048_576,
