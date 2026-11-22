@@ -1,8 +1,14 @@
-"""Browser session endpoints for the shared operator credential."""
+"""Authentication endpoints for operators and public users."""
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, SecretStr
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from agentforge.api.auth import (
     SESSION_COOKIE,
@@ -15,6 +21,22 @@ from agentforge.api.auth import (
     secure_compare,
     validate_browser_origin,
 )
+from agentforge.api.schemas import (
+    LoginRequest,
+    LoginResponse,
+    RegistrationRequest,
+    RegistrationResponse,
+    UserResponse,
+)
+from agentforge.api.user_auth import (
+    USER_SESSION_COOKIE,
+    create_user_session,
+    hash_password,
+    revoke_user_session,
+    verify_password,
+)
+from agentforge.database.dependencies import get_db_session
+from agentforge.domain.models import User, Workspace, WorkspaceMembership
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
@@ -74,6 +96,87 @@ def logout(request: Request, response: Response) -> Response:
     revoke_operator_session(request)
     response.delete_cookie(
         SESSION_COOKIE,
+        path="/api/v1",
+        httponly=True,
+        secure=request.app.state.settings.app_env.casefold() == "production",
+        samesite="strict",
+    )
+    response.status_code = 204
+    return response
+
+
+@router.post("/register", response_model=RegistrationResponse, status_code=201)
+def register(
+    body: RegistrationRequest,
+    request: Request,
+    session: Session = Depends(get_db_session),
+) -> RegistrationResponse:
+    """Create a pending user, personal workspace, and owner membership atomically."""
+    validate_browser_origin(request)
+    user = User(
+        email=body.email,
+        password_hash=hash_password(body.password),
+        account_status="pending",
+    )
+    workspace = Workspace(
+        name="Personal Workspace",
+        slug=f"personal-{uuid4().hex}",
+        owner=user,
+        status="active",
+    )
+    membership = WorkspaceMembership(workspace=workspace, user=user, role="owner")
+    session.add_all([user, workspace, membership])
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="An account with that email already exists.",
+        ) from exc
+    return RegistrationResponse(user=UserResponse.model_validate(user), workspace_id=workspace.id)
+
+
+@router.post("/login", response_model=LoginResponse)
+def user_login(
+    body: LoginRequest,
+    request: Request,
+    response: Response,
+    session: Session = Depends(get_db_session),
+) -> LoginResponse:
+    """Authenticate a user without exposing account existence in failures."""
+    validate_browser_origin(request)
+    check_login_rate_limit(request, scope="user")
+    user = session.scalar(select(User).where(User.email == body.email))
+    password_valid = verify_password(body.password, user.password_hash if user else None)
+    if user is None or user.account_status in {"suspended", "deleted"} or not password_valid:
+        record_login_failure(request, scope="user")
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+
+    clear_login_failures(request, scope="user")
+    user.last_login_at = datetime.now(UTC)
+    session.commit()
+    token, expires_at = create_user_session(request, user.id)
+    settings = request.app.state.settings
+    response.set_cookie(
+        USER_SESSION_COOKIE,
+        token,
+        httponly=True,
+        secure=settings.app_env.casefold() == "production",
+        samesite="strict",
+        path="/api/v1",
+        max_age=1800,
+    )
+    return LoginResponse(user=UserResponse.model_validate(user), expires_at=expires_at)
+
+
+@router.delete("/logout", status_code=204)
+def user_logout(request: Request, response: Response) -> Response:
+    """Revoke the current public-user browser session."""
+    validate_browser_origin(request)
+    revoke_user_session(request)
+    response.delete_cookie(
+        USER_SESSION_COOKIE,
         path="/api/v1",
         httponly=True,
         secure=request.app.state.settings.app_env.casefold() == "production",

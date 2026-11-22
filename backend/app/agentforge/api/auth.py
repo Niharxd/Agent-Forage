@@ -106,34 +106,42 @@ def revoke_operator_session(request: Request) -> None:
             active.pop(session_id, None)
 
 
-def check_login_rate_limit(request: Request) -> None:
+def _login_client_key(request: Request, scope: str) -> str:
+    client_key = request.client.host if request.client is not None else "unknown"
+    return f"{scope}:{client_key}"
+
+
+def check_login_rate_limit(request: Request, *, scope: str = "operator") -> None:
     """Reject repeated login attempts from one client for a short cooling-off period."""
     now = time.time()
-    client_key = request.client.host if request.client is not None else "unknown"
-    attempts, reset_at = request.app.state.login_attempts.get(client_key, (0, now))
-    if reset_at <= now:
-        request.app.state.login_attempts.pop(client_key, None)
-        return
-    if attempts >= LOGIN_FAILURE_LIMIT:
-        raise HTTPException(
-            status_code=429,
-            detail="Too many authentication attempts. Try again later.",
-            headers={"Retry-After": str(max(1, int(reset_at - now)))},
-        )
+    client_key = _login_client_key(request, scope)
+    with request.app.state.session_lock:
+        attempts, reset_at = request.app.state.login_attempts.get(client_key, (0, now))
+        if reset_at <= now:
+            request.app.state.login_attempts.pop(client_key, None)
+            return
+        if attempts >= LOGIN_FAILURE_LIMIT:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many authentication attempts. Try again later.",
+                headers={"Retry-After": str(max(1, int(reset_at - now)))},
+            )
 
 
-def record_login_failure(request: Request) -> None:
+def record_login_failure(request: Request, *, scope: str = "operator") -> None:
     now = time.time()
-    client_key = request.client.host if request.client is not None else "unknown"
-    attempts, reset_at = request.app.state.login_attempts.get(client_key, (0, now))
-    if reset_at <= now:
-        attempts, reset_at = 0, now + LOGIN_FAILURE_WINDOW_SECONDS
-    request.app.state.login_attempts[client_key] = (attempts + 1, reset_at)
+    client_key = _login_client_key(request, scope)
+    with request.app.state.session_lock:
+        attempts, reset_at = request.app.state.login_attempts.get(client_key, (0, now))
+        if reset_at <= now:
+            attempts, reset_at = 0, now + LOGIN_FAILURE_WINDOW_SECONDS
+        request.app.state.login_attempts[client_key] = (attempts + 1, reset_at)
 
 
-def clear_login_failures(request: Request) -> None:
-    client_key = request.client.host if request.client is not None else "unknown"
-    request.app.state.login_attempts.pop(client_key, None)
+def clear_login_failures(request: Request, *, scope: str = "operator") -> None:
+    client_key = _login_client_key(request, scope)
+    with request.app.state.session_lock:
+        request.app.state.login_attempts.pop(client_key, None)
 
 
 def require_browser_operator_session(request: Request) -> None:

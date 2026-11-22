@@ -144,3 +144,78 @@ class WorkflowPrepareResponse(BaseModel):
 
 
 PageLimit = Annotated[int, Field(ge=1, le=100)]
+
+
+class RegistrationRequest(BaseModel):
+    """Credentials used to create a public user account."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=12, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        local, separator, domain = normalized.rpartition("@")
+        if (
+            not separator
+            or not local
+            or not domain
+            or "." not in domain
+            or any(character.isspace() for character in normalized)
+        ):
+            raise ValueError("email must be a valid email address")
+        return normalized
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, value: str) -> str:
+        if (
+            not any(character.islower() for character in value)
+            or not any(character.isupper() for character in value)
+            or not any(character.isdigit() for character in value)
+        ):
+            raise ValueError("password must contain upper, lower, and numeric characters")
+        return value
+
+
+class LoginRequest(BaseModel):
+    """Credentials used to authenticate a public user account."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        return value.strip().lower()
+
+
+class UserResponse(BaseModel):
+    """Safe public user representation."""
+
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+    id: UUID
+    email: str
+    account_status: str
+    email_verified_at: datetime | None
+    last_login_at: datetime | None
+
+
+class RegistrationResponse(BaseModel):
+    """New user and automatically-created personal workspace."""
+
+    user: UserResponse
+    workspace_id: UUID
+
+
+class LoginResponse(BaseModel):
+    """Authenticated user and session expiry."""
+
+    user: UserResponse
+    expires_at: int
