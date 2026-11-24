@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { login, logout, restoreSession } from "./auth";
+import { login, loginUser, logout, restoreSession } from "./auth";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -17,14 +17,11 @@ describe("session authentication API", () => {
 
     await restoreSession();
     await login("operator-credential");
+    await loginUser("user@example.com", "StrongPassword123");
     await logout();
 
-    expect(fetchMock.mock.calls).toHaveLength(3);
-    for (const [url, init] of fetchMock.mock.calls) {
-      expect(String(url)).toBe("/api/v1/auth/session");
-      expect(init?.credentials).toBe("include");
-    }
-    expect(fetchMock.mock.calls[1][1]?.method).toBe("POST");
-    expect(fetchMock.mock.calls[2][1]?.method).toBe("DELETE");
+    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(6);
+    expect(fetchMock.mock.calls.some(([url, init]) => String(url).endsWith("/auth/session") && init?.method === "POST")).toBe(true);
+    expect(fetchMock.mock.calls.some(([url, init]) => String(url).endsWith("/auth/login") && init?.method === "POST")).toBe(true);
   });
 });

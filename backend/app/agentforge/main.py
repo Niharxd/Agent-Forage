@@ -6,12 +6,11 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from threading import RLock
 
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from agentforge.api.auth import require_api_access_token
 from agentforge.api.errors import (
     http_exception_handler,
     unhandled_exception_handler,
@@ -111,22 +110,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.add_exception_handler(Exception, unhandled_exception_handler)
     application.include_router(health_router, prefix="/api/v1")
     application.include_router(auth_router, prefix="/api/v1")
-    # Keep local mock mode frictionless; production and OpenAI modes always
-    # require server-side authentication on workflow and execution routes.
-    protected_router_dependencies = (
-        [Depends(require_api_access_token)]
-        if app_settings.app_env == "production" or app_settings.provider_mode == "openai"
-        else []
-    )
     application.include_router(
         workflows_router,
         prefix="/api/v1",
-        dependencies=protected_router_dependencies,
     )
     application.include_router(
         executions_router,
         prefix="/api/v1",
-        dependencies=protected_router_dependencies,
     )
     return application
 

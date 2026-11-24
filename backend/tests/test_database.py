@@ -6,13 +6,19 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
+import agentforge.api.dependencies as api_dependencies
 import pytest
 from agentforge.api.services.executions import (
     ExecutionAlreadyExistsError,
     ExecutionPersistenceError,
     ExecutionRepository,
 )
-from agentforge.api.services.workflows import create_planned_workflow_execution
+from agentforge.api.services.workflows import (
+    create_planned_workflow_execution,
+    create_workflow,
+    get_workflow,
+    list_workflows,
+)
 from agentforge.api.user_auth import USER_SESSION_COOKIE, hash_password
 from agentforge.config.settings import Settings
 from agentforge.database.dependencies import get_db_session
@@ -52,7 +58,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from fastapi import Depends
+from fastapi import Depends, HTTPException, Request
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import delete, func, select, text, update
@@ -144,6 +150,230 @@ def test_legacy_workspace_is_created_for_existing_operator_compatibility(
     )
     assert membership is not None
     assert membership.role == "owner"
+
+
+def test_postgres_workflow_lookup_and_listing_are_workspace_isolated(
+    db_session: Session,
+) -> None:
+    user_a = User(
+        email=f"user-a-{uuid4().hex}@example.com",
+        password_hash=hash_password("StrongPassword123"),
+        account_status="active",
+    )
+    workspace_a = Workspace(
+        name="Workspace A",
+        slug=f"personal-{uuid4().hex}",
+        owner=user_a,
+        status="active",
+    )
+    membership_a = WorkspaceMembership(workspace=workspace_a, user=user_a, role="owner")
+
+    user_b = User(
+        email=f"user-b-{uuid4().hex}@example.com",
+        password_hash=hash_password("StrongPassword123"),
+        account_status="active",
+    )
+    workspace_b = Workspace(
+        name="Workspace B",
+        slug=f"personal-{uuid4().hex}",
+        owner=user_b,
+        status="active",
+    )
+    membership_b = WorkspaceMembership(workspace=workspace_b, user=user_b, role="owner")
+    db_session.add_all([membership_a, membership_b])
+    db_session.commit()
+
+    definition_a = WorkflowDefinition(
+        name=f"workspace-a-{uuid4().hex}",
+        description="A workflow owned by workspace A.",
+        tasks=[
+            WorkflowTask(
+                task_id="analyze-a",
+                agent_type=AgentRole.ANALYST,
+                input_data={"scope": "a"},
+            )
+        ],
+    )
+    created_a = create_workflow(
+        db_session,
+        definition_a,
+        workspace_id=workspace_a.id,
+        user_id=user_a.id,
+    )
+
+    own = get_workflow(
+        db_session,
+        created_a.id,
+        workspace_id=workspace_a.id,
+    )
+    assert own is not None
+    assert own.id == created_a.id
+
+    cross_workspace = get_workflow(
+        db_session,
+        created_a.id,
+        workspace_id=workspace_b.id,
+    )
+    assert cross_workspace is None
+
+    items_b, total_b = list_workflows(
+        db_session,
+        limit=50,
+        offset=0,
+        workspace_id=workspace_b.id,
+    )
+    assert total_b == 0
+    assert items_b == []
+
+    items_a, total_a = list_workflows(
+        db_session,
+        limit=50,
+        offset=0,
+        workspace_id=workspace_a.id,
+    )
+    assert total_a == 1
+    assert [item.id for item in items_a] == [created_a.id]
+
+
+def test_postgres_api_cross_workspace_workflow_access_is_denied(
+    migrated_database: Engine,
+) -> None:
+    password = "StrongPassword123"
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        cors_origins=["http://localhost:5173"],
+        api_access_token=SecretStr("operator-secret"),
+        session_signing_secret=SecretStr("s" * 40),
+    )
+
+    def db_session_override() -> Iterator[Session]:
+        with Session(migrated_database) as session:
+            yield session
+
+    application = create_app(settings)
+    application.dependency_overrides[get_db_session] = db_session_override
+
+    email_a = f"user-a-{uuid4().hex}@example.com"
+    email_b = f"user-b-{uuid4().hex}@example.com"
+
+    with TestClient(application) as registration_client:
+        for email in (email_a, email_b):
+            registered = registration_client.post(
+                "/api/v1/auth/register",
+                json={"email": email, "password": password},
+                headers={"Origin": "http://localhost:5173"},
+            )
+            assert registered.status_code == 201
+
+    with TestClient(application) as client_a, TestClient(application) as client_b:
+        login_a = client_a.post(
+            "/api/v1/auth/login",
+            json={"email": email_a, "password": password},
+            headers={"Origin": "http://localhost:5173"},
+        )
+        login_b = client_b.post(
+            "/api/v1/auth/login",
+            json={"email": email_b, "password": password},
+            headers={"Origin": "http://localhost:5173"},
+        )
+        assert login_a.status_code == 200
+        assert login_b.status_code == 200
+
+        payload = {
+            "name": f"cross-workspace-{uuid4().hex}",
+            "description": "Owned by user A.",
+            "tasks": [{"task_id": "analyze", "agent_type": "analyst"}],
+        }
+        payload["workspace_id"] = str(uuid4())
+        payload["created_by_user_id"] = str(uuid4())
+
+        forged_create = client_a.post(
+            "/api/v1/workflows",
+            json=payload,
+            headers={"Origin": "http://localhost:5173"},
+        )
+        assert forged_create.status_code == 422
+
+        payload.pop("workspace_id")
+        payload.pop("created_by_user_id")
+        created = client_a.post(
+            "/api/v1/workflows",
+            json=payload,
+            headers={"Origin": "http://localhost:5173"},
+        )
+        assert created.status_code == 201
+        workflow_id = created.json()["id"]
+
+        own = client_a.get(f"/api/v1/workflows/{workflow_id}")
+        assert own.status_code == 200
+
+        cross = client_b.get(f"/api/v1/workflows/{workflow_id}")
+        assert cross.status_code == 404
+
+        cross_execution = client_b.post(
+            f"/api/v1/workflows/{workflow_id}/executions",
+        )
+        assert cross_execution.status_code == 404
+
+        listing = client_b.get("/api/v1/workflows")
+        assert listing.status_code == 200
+        assert workflow_id not in {item["id"] for item in listing.json()["items"]}
+
+        own_with_invalid_bearer = client_a.get(
+            f"/api/v1/workflows/{workflow_id}",
+            headers={"Authorization": "Bearer invalid-token"},
+        )
+        assert own_with_invalid_bearer.status_code == 200
+
+        operator_with_public_cookie = client_a.get(
+            f"/api/v1/workflows/{workflow_id}",
+            headers={"Authorization": "Bearer operator-secret"},
+        )
+        assert operator_with_public_cookie.status_code == 404
+
+    with TestClient(application) as unauthenticated:
+        assert unauthenticated.get(f"/api/v1/workflows/{workflow_id}").status_code == 401
+        unauthenticated.cookies.set(USER_SESSION_COOKIE, "forged.invalid.cookie")
+        assert unauthenticated.get(f"/api/v1/workflows/{workflow_id}").status_code == 401
+
+
+def test_inactive_workspace_membership_is_rejected(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = User(
+        email=f"suspended-{uuid4().hex}@example.com",
+        password_hash=hash_password("StrongPassword123"),
+        account_status="active",
+    )
+    workspace = Workspace(
+        name="Suspended Workspace",
+        slug=f"personal-{uuid4().hex}",
+        owner=user,
+        status="suspended",
+    )
+    membership = WorkspaceMembership(workspace=workspace, user=user, role="owner")
+    db_session.add(membership)
+    db_session.commit()
+
+    monkeypatch.setattr(api_dependencies, "get_authenticated_user", lambda _request, _session: user)
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": [],
+            "query_string": b"",
+            "server": ("testserver", 80),
+            "client": ("testclient", 123),
+            "scheme": "http",
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        api_dependencies.require_workflow_access(request, db_session)
+    assert exc.value.status_code == 403
 
 
 def test_settings_select_test_database_and_reject_non_postgresql_urls() -> None:
@@ -359,6 +589,16 @@ def test_prepare_route_survives_postcommit_refresh_failure_and_registers_executi
         test_database_url=TEST_DATABASE_URL,
     )
     application = create_app(settings)
+    with Session(migrated_database) as legacy_session:
+        legacy = _legacy_workspace(legacy_session)
+    application.dependency_overrides[api_dependencies.require_workflow_access] = lambda: (
+        api_dependencies.WorkflowAccess(
+            workspace_id=legacy.id,
+            user_id=legacy.owner_id,
+            role="owner",
+            operator=True,
+        )
+    )
     original_commit = Session.commit
     original_refresh = Session.refresh
 
@@ -667,6 +907,16 @@ def test_fastapi_session_dependency_closes_request_session(
 def test_workflow_api_persists_versioned_definitions(migrated_database: Engine) -> None:
     settings = Settings(app_env="test")
     application = create_app(settings)
+    with Session(migrated_database) as legacy_session:
+        legacy = _legacy_workspace(legacy_session)
+    application.dependency_overrides[api_dependencies.require_workflow_access] = lambda: (
+        api_dependencies.WorkflowAccess(
+            workspace_id=legacy.id,
+            user_id=legacy.owner_id,
+            role="owner",
+            operator=True,
+        )
+    )
     workflow_name = f"api-persistence-{uuid4().hex}"
     payload = {
         "name": workflow_name,
@@ -1284,6 +1534,16 @@ def test_persisted_execution_api_survives_engine_history_replacement(
 ) -> None:
     settings = Settings(_env_file=None, app_env="test")
     application = create_app(settings)
+    with Session(migrated_database) as legacy_session:
+        legacy = _legacy_workspace(legacy_session)
+    application.dependency_overrides[api_dependencies.require_workflow_access] = lambda: (
+        api_dependencies.WorkflowAccess(
+            workspace_id=legacy.id,
+            user_id=legacy.owner_id,
+            role="owner",
+            operator=True,
+        )
+    )
     payload = {
         "name": f"api-execution-{uuid4().hex}",
         "description": "Persisted API execution.",

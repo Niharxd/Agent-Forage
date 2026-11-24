@@ -8,7 +8,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from agentforge.api.auth import require_approval_operator
-from agentforge.api.dependencies import get_workflow_engine, get_workflow_orchestrator
+from agentforge.api.dependencies import (
+    WorkflowAccess,
+    get_workflow_engine,
+    get_workflow_orchestrator,
+    require_workflow_access,
+)
 from agentforge.api.responses import execution_response
 from agentforge.api.schemas import (
     ExecutionApprovalResponse,
@@ -43,9 +48,10 @@ def create_execution(
     workflow_id: UUID,
     session: Annotated[Session, Depends(get_db_session)],
     engine: Annotated[WorkflowEngine, Depends(get_workflow_engine)],
+    access: Annotated[WorkflowAccess, Depends(require_workflow_access)],
 ) -> ExecutionResponse:
     """Create a validated pending execution; no agent or tool runs until start."""
-    workflow = get_workflow(session, workflow_id)
+    workflow = get_workflow(session, workflow_id, workspace_id=access.workspace_id)
     if workflow is None:
         raise HTTPException(status_code=404, detail="Workflow not found.")
     try:
@@ -81,9 +87,14 @@ def start_execution(
     execution_id: UUID,
     session: Annotated[Session, Depends(get_db_session)],
     orchestrator: Annotated[WorkflowOrchestrator, Depends(get_workflow_orchestrator)],
+    access: Annotated[WorkflowAccess, Depends(require_workflow_access)],
 ) -> ExecutionResponse:
     """Synchronously run a pending execution through the existing workflow engine."""
     repository = ExecutionRepository(session)
+    try:
+        repository.get_execution(execution_id, workspace_id=access.workspace_id)
+    except ExecutionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Execution not found.") from exc
     orchestrator.engine._approval_repository = repository
     try:
         execution = orchestrator.start(execution_id, on_update=repository.synchronize_execution)
@@ -194,6 +205,7 @@ def reject_execution_approval(
 @router.get("/executions", response_model=ExecutionListResponse)
 def get_executions(
     session: Annotated[Session, Depends(get_db_session)],
+    access: Annotated[WorkflowAccess, Depends(require_workflow_access)],
     limit: PageLimit = Query(default=50),
     offset: Annotated[int, Query(ge=0)] = 0,
     status: WorkflowStatus | None = None,
@@ -205,6 +217,7 @@ def get_executions(
         offset=offset,
         status=status,
         search=search,
+        workspace_id=access.workspace_id,
     )
     return ExecutionListResponse(
         items=[execution_response(item) for item in snapshots],
@@ -218,11 +231,13 @@ def get_executions(
 def get_execution(
     execution_id: UUID,
     session: Annotated[Session, Depends(get_db_session)],
+    access: Annotated[WorkflowAccess, Depends(require_workflow_access)],
 ) -> ExecutionResponse:
     """Reconstruct persisted execution details and its safe plan projection."""
     try:
         snapshot, workflow_definition = ExecutionRepository(session).get_execution_details(
-            execution_id
+            execution_id,
+            workspace_id=access.workspace_id,
         )
     except ExecutionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Execution not found.") from exc
@@ -234,9 +249,14 @@ def cancel_execution(
     execution_id: UUID,
     session: Annotated[Session, Depends(get_db_session)],
     orchestrator: Annotated[WorkflowOrchestrator, Depends(get_workflow_orchestrator)],
+    access: Annotated[WorkflowAccess, Depends(require_workflow_access)],
 ) -> ExecutionResponse:
     """Cancel pending work or request cooperative cancellation of running work."""
     repository = ExecutionRepository(session)
+    try:
+        repository.get_execution(execution_id, workspace_id=access.workspace_id)
+    except ExecutionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Execution not found.") from exc
     orchestrator.engine._approval_repository = repository
     try:
         snapshot = orchestrator.cancel(

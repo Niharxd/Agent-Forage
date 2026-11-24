@@ -6,7 +6,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from agentforge.api.dependencies import get_workflow_engine, get_workflow_orchestrator
+from agentforge.api.dependencies import (
+    WorkflowAccess,
+    get_workflow_engine,
+    get_workflow_orchestrator,
+    require_workflow_access,
+)
 from agentforge.api.responses import execution_response
 from agentforge.api.schemas import (
     PageLimit,
@@ -66,6 +71,7 @@ def _validation_issues(
 def validate_workflow(
     body: WorkflowCreateRequest,
     engine: Annotated[WorkflowEngine, Depends(get_workflow_engine)],
+    _access: Annotated[WorkflowAccess, Depends(require_workflow_access)],
 ) -> WorkflowValidationResponse:
     """Validate a workflow and all declared tool permissions without storing it."""
     definition = validate_request_schema(body)
@@ -85,6 +91,7 @@ def prepare_workflow(
     body: WorkflowPrepareRequest,
     session: Annotated[Session, Depends(get_db_session)],
     orchestrator: Annotated[WorkflowOrchestrator, Depends(get_workflow_orchestrator)],
+    access: Annotated[WorkflowAccess, Depends(require_workflow_access)],
 ) -> WorkflowPrepareResponse:
     """Plan a task, persist its validated workflow, and leave it pending for review."""
     persisted_workflow: WorkflowResponse | None = None
@@ -99,6 +106,8 @@ def prepare_workflow(
             definition,
             snapshot,
             original_task=body.task_description,
+            workspace_id=access.workspace_id,
+            user_id=access.user_id,
         )
 
     try:
@@ -136,12 +145,20 @@ def create_workflow_definition(
     body: WorkflowCreateRequest,
     session: Annotated[Session, Depends(get_db_session)],
     engine: Annotated[WorkflowEngine, Depends(get_workflow_engine)],
+    access: Annotated[WorkflowAccess, Depends(require_workflow_access)],
 ) -> WorkflowResponse:
     """Validate and persist a new version of a workflow definition."""
     definition = validate_request_schema(body)
     try:
         validated = engine.validate_definition(definition)
-        return create_workflow(session, validated)
+        if access.user_id is None:
+            raise RuntimeError("Workflow access has no persisted user identity.")
+        return create_workflow(
+            session,
+            validated,
+            workspace_id=access.workspace_id,
+            user_id=access.user_id,
+        )
     except WorkflowValidationError as exc:
         raise HTTPException(
             status_code=422,
@@ -169,11 +186,17 @@ def create_workflow_definition(
 @router.get("", response_model=WorkflowListResponse)
 def get_workflows(
     session: Annotated[Session, Depends(get_db_session)],
+    access: Annotated[WorkflowAccess, Depends(require_workflow_access)],
     limit: PageLimit = Query(default=50),
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> WorkflowListResponse:
     """List persisted workflow definitions with pagination."""
-    items, total = list_workflows(session, limit=limit, offset=offset)
+    items, total = list_workflows(
+        session,
+        limit=limit,
+        offset=offset,
+        workspace_id=access.workspace_id,
+    )
     return WorkflowListResponse(items=items, total=total, limit=limit, offset=offset)
 
 
@@ -181,9 +204,10 @@ def get_workflows(
 def get_workflow_definition(
     workflow_id: UUID,
     session: Annotated[Session, Depends(get_db_session)],
+    access: Annotated[WorkflowAccess, Depends(require_workflow_access)],
 ) -> WorkflowResponse:
     """Retrieve a workflow definition by its persistent identifier."""
-    response = get_workflow(session, workflow_id)
+    response = get_workflow(session, workflow_id, workspace_id=access.workspace_id)
     if response is None:
         raise HTTPException(status_code=404, detail="Workflow not found.")
     return response

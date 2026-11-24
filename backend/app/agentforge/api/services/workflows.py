@@ -19,9 +19,23 @@ class WorkflowVersionConflict(Exception):
 def create_workflow(
     session: Session,
     definition: WorkflowDefinition,
+    *,
+    workspace_id: UUID | None = None,
+    user_id: UUID | None = None,
 ) -> WorkflowResponse:
     """Persist one validated definition as the next version of its name."""
-    record = _new_workflow_record(session, definition)
+    if workspace_id is None or user_id is None:
+        legacy = session.scalar(select(Workspace).where(Workspace.slug == "legacy-operator"))
+        if legacy is None:
+            raise RuntimeError("The legacy operator workspace is not initialized.")
+        workspace_id = workspace_id or legacy.id
+        user_id = user_id or legacy.owner_id
+    record = _new_workflow_record(
+        session,
+        definition,
+        workspace_id=workspace_id,
+        user_id=user_id,
+    )
     session.add(record)
     try:
         session.commit()
@@ -38,9 +52,22 @@ def create_planned_workflow_execution(
     snapshot: WorkflowExecutionSnapshot,
     *,
     original_task: str,
+    workspace_id: UUID | None = None,
+    user_id: UUID | None = None,
 ) -> WorkflowResponse:
     """Persist a planner-created workflow and its initial execution atomically."""
-    record = _new_workflow_record(session, definition)
+    if workspace_id is None or user_id is None:
+        legacy = session.scalar(select(Workspace).where(Workspace.slug == "legacy-operator"))
+        if legacy is None:
+            raise RuntimeError("The legacy operator workspace is not initialized.")
+        workspace_id = workspace_id or legacy.id
+        user_id = user_id or legacy.owner_id
+    record = _new_workflow_record(
+        session,
+        definition,
+        workspace_id=workspace_id,
+        user_id=user_id,
+    )
     session.add(record)
     try:
         session.flush()
@@ -64,13 +91,16 @@ def create_planned_workflow_execution(
     return saved_workflow
 
 
-def _new_workflow_record(session: Session, definition: WorkflowDefinition) -> Workflow:
-    legacy_workspace = session.scalar(select(Workspace).where(Workspace.slug == "legacy-operator"))
-    if legacy_workspace is None:
-        raise RuntimeError("The legacy operator workspace is not initialized.")
+def _new_workflow_record(
+    session: Session,
+    definition: WorkflowDefinition,
+    *,
+    workspace_id: UUID,
+    user_id: UUID,
+) -> Workflow:
     latest_version = session.scalar(
         select(func.max(Workflow.version)).where(
-            Workflow.workspace_id == legacy_workspace.id,
+            Workflow.workspace_id == workspace_id,
             Workflow.name == definition.name,
         )
     )
@@ -79,21 +109,23 @@ def _new_workflow_record(session: Session, definition: WorkflowDefinition) -> Wo
         description=definition.description,
         version=(latest_version or 0) + 1,
         workflow_definition=definition.model_dump(mode="json"),
-        workspace_id=legacy_workspace.id,
-        created_by_user_id=legacy_workspace.owner_id,
-        updated_by_user_id=legacy_workspace.owner_id,
+        workspace_id=workspace_id,
+        created_by_user_id=user_id,
+        updated_by_user_id=user_id,
     )
 
 
-def get_workflow(session: Session, workflow_id: UUID) -> WorkflowResponse | None:
+def get_workflow(
+    session: Session,
+    workflow_id: UUID,
+    *,
+    workspace_id: UUID,
+) -> WorkflowResponse | None:
     """Return a workflow response without exposing the SQLAlchemy object."""
-    legacy_workspace = session.scalar(select(Workspace).where(Workspace.slug == "legacy-operator"))
-    if legacy_workspace is None:
-        return None
     record = session.scalar(
         select(Workflow).where(
             Workflow.id == workflow_id,
-            Workflow.workspace_id == legacy_workspace.id,
+            Workflow.workspace_id == workspace_id,
         )
     )
     return workflow_response(record) if record is not None else None
@@ -104,12 +136,10 @@ def list_workflows(
     *,
     limit: int,
     offset: int,
+    workspace_id: UUID,
 ) -> tuple[list[WorkflowResponse], int]:
     """Return workflows ordered by name and descending version."""
-    legacy_workspace = session.scalar(select(Workspace).where(Workspace.slug == "legacy-operator"))
-    if legacy_workspace is None:
-        return [], 0
-    scoped = select(Workflow).where(Workflow.workspace_id == legacy_workspace.id)
+    scoped = select(Workflow).where(Workflow.workspace_id == workspace_id)
     total = session.scalar(select(func.count()).select_from(scoped.subquery())) or 0
     records = session.scalars(
         scoped.order_by(Workflow.name.asc(), Workflow.version.desc()).offset(offset).limit(limit)

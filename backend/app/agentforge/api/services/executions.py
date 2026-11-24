@@ -195,18 +195,36 @@ class ExecutionRepository:
             self._session.rollback()
             raise ExecutionPersistenceError("The execution state transaction failed.") from exc
 
-    def get_execution(self, execution_id: UUID) -> WorkflowExecutionSnapshot:
+    def get_execution(
+        self,
+        execution_id: UUID,
+        *,
+        workspace_id: UUID | None = None,
+    ) -> WorkflowExecutionSnapshot:
         """Reconstruct a detached execution snapshot from PostgreSQL."""
-        record = self._load_execution(execution_id)
+        if workspace_id is None:
+            legacy = self._session.scalar(
+                select(Workspace).where(Workspace.slug == "legacy-operator")
+            )
+            workspace_id = legacy.id if legacy is not None else UUID(int=0)
+        record = self._load_execution(execution_id, workspace_id=workspace_id)
         if record is None:
             raise ExecutionNotFoundError(f"Execution {execution_id} was not found.")
         return self._snapshot(record)
 
     def get_execution_details(
-        self, execution_id: UUID
+        self,
+        execution_id: UUID,
+        *,
+        workspace_id: UUID | None = None,
     ) -> tuple[WorkflowExecutionSnapshot, WorkflowDefinition]:
         """Return persisted execution state and its validated workflow definition."""
-        record = self._load_execution(execution_id)
+        if workspace_id is None:
+            legacy = self._session.scalar(
+                select(Workspace).where(Workspace.slug == "legacy-operator")
+            )
+            workspace_id = legacy.id if legacy is not None else UUID(int=0)
+        record = self._load_execution(execution_id, workspace_id=workspace_id)
         if record is None:
             raise ExecutionNotFoundError(f"Execution {execution_id} was not found.")
         if record.workflow is None:
@@ -372,15 +390,18 @@ class ExecutionRepository:
         offset: int,
         status: WorkflowStatus | None = None,
         search: str | None = None,
+        workspace_id: UUID | None = None,
     ) -> tuple[list[WorkflowExecutionSnapshot], int]:
         """Return filtered persisted executions in newest-first paginated order."""
-        legacy_workspace = self._session.scalar(
-            select(Workspace).where(Workspace.slug == "legacy-operator")
-        )
-        if legacy_workspace is None:
-            return [], 0
+        if workspace_id is None:
+            legacy = self._session.scalar(
+                select(Workspace).where(Workspace.slug == "legacy-operator")
+            )
+            if legacy is None:
+                return [], 0
+            workspace_id = legacy.id
         filters = [WorkflowExecution.status.in_(_API_WORKFLOW_STATUSES)]
-        filters.append(WorkflowExecution.workspace_id == legacy_workspace.id)
+        filters.append(WorkflowExecution.workspace_id == workspace_id)
         if status is not None:
             filters.append(WorkflowExecution.status == status.value)
         if search and search.strip():
@@ -421,12 +442,12 @@ class ExecutionRepository:
         ).all()
         return [self._snapshot(record) for record in records], total
 
-    def _load_execution(self, execution_id: UUID) -> WorkflowExecution | None:
-        legacy_workspace = self._session.scalar(
-            select(Workspace).where(Workspace.slug == "legacy-operator")
-        )
-        if legacy_workspace is None:
-            return None
+    def _load_execution(
+        self,
+        execution_id: UUID,
+        *,
+        workspace_id: UUID,
+    ) -> WorkflowExecution | None:
         return self._session.scalar(
             select(WorkflowExecution)
             .options(
@@ -436,7 +457,7 @@ class ExecutionRepository:
             )
             .where(
                 WorkflowExecution.id == execution_id,
-                WorkflowExecution.workspace_id == legacy_workspace.id,
+                WorkflowExecution.workspace_id == workspace_id,
             )
         )
 

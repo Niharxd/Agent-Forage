@@ -99,8 +99,9 @@ async function request<T>(path: string, signal?: AbortSignal, init?: RequestInit
       if (!signal?.aborted && typeof window !== "undefined") {
         window.dispatchEvent(new Event("agentforge:session-expired"));
       }
-      throw new Error("Your operator session expired. Sign in again to continue.");
+      throw new Error("Your session expired. Sign in again to continue.");
     }
+    if (response.status === 403) throw new Error("You do not have permission to access this workspace.");
     if (response.status === 503) throw new Error("The API is temporarily unavailable or operator authentication is not configured.");
     let detail = "";
     try { const body = await response.json() as { detail?: unknown }; detail = typeof body.detail === "string" ? body.detail : ""; } catch { /* response may not contain JSON */ }

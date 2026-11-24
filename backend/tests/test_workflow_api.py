@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from agentforge.agents import AnalystAgent, PlannerAgent, ResearcherAgent, ReviewerAgent
-from agentforge.api.dependencies import get_workflow_engine
+from agentforge.api.dependencies import WorkflowAccess, get_workflow_engine, require_workflow_access
 from agentforge.api.routes import executions as execution_routes
 from agentforge.api.routes import workflows as workflow_routes
 from agentforge.api.schemas import WorkflowResponse
@@ -42,13 +42,13 @@ def api(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, WorkflowEngine, Fa
         def synchronize_execution(self, snapshot) -> None:
             stored_executions[snapshot.execution_id] = snapshot.model_copy(deep=True)
 
-        def get_execution(self, execution_id: UUID) -> WorkflowExecutionSnapshot:
+        def get_execution(self, execution_id: UUID, **_kwargs) -> WorkflowExecutionSnapshot:
             snapshot = stored_executions.get(execution_id)
             if snapshot is None:
                 raise ExecutionNotFoundError
             return snapshot.model_copy(deep=True)
 
-        def get_execution_details(self, execution_id: UUID):
+        def get_execution_details(self, execution_id: UUID, **_kwargs):
             return self.get_execution(execution_id), execution_definitions[execution_id]
 
         def list_executions(
@@ -58,6 +58,7 @@ def api(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, WorkflowEngine, Fa
             offset: int,
             status: WorkflowStatus | None = None,
             search: str | None = None,
+            **_kwargs,
         ):
             records = sorted(
                 stored_executions.values(),
@@ -78,7 +79,11 @@ def api(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, WorkflowEngine, Fa
                 records
             )
 
-    def create_stored_workflow(_, definition: WorkflowDefinition) -> WorkflowResponse:
+    def create_stored_workflow(
+        _,
+        definition: WorkflowDefinition,
+        **_kwargs,
+    ) -> WorkflowResponse:
         versions = [
             item.version for item in stored_workflows.values() if item.name == definition.name
         ]
@@ -105,10 +110,10 @@ def api(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, WorkflowEngine, Fa
         )
         return record
 
-    def get_stored_workflow(_, workflow_id: UUID) -> WorkflowResponse | None:
+    def get_stored_workflow(_, workflow_id: UUID, **_kwargs) -> WorkflowResponse | None:
         return stored_workflows.get(workflow_id)
 
-    def list_stored_workflows(_, *, limit: int, offset: int):
+    def list_stored_workflows(_, *, limit: int, offset: int, **_kwargs):
         records = sorted(
             stored_workflows.values(),
             key=lambda item: (item.name, -item.version),
@@ -130,6 +135,11 @@ def api(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, WorkflowEngine, Fa
     monkeypatch.setattr(execution_routes, "ExecutionRepository", FakeExecutionRepository)
     application.dependency_overrides[get_db_session] = override_session
     application.dependency_overrides[get_workflow_engine] = lambda: workflow_engine
+    application.dependency_overrides[require_workflow_access] = lambda: WorkflowAccess(
+        workspace_id=uuid4(),
+        user_id=uuid4(),
+        role="owner",
+    )
     with TestClient(application, raise_server_exceptions=False) as client:
         yield client, workflow_engine, application
 
@@ -302,6 +312,12 @@ def test_missing_workflow_and_invalid_payload_use_safe_http_errors(api) -> None:
     assert invalid.status_code == 422
     assert invalid.json()["error"]["code"] == "validation_error"
     assert "not-an-agent" not in invalid.text
+
+    forged_ownership = workflow_body()
+    forged_ownership["workspace_id"] = str(uuid4())
+    forged_ownership["created_by_user_id"] = str(uuid4())
+    forged_creation = client.post("/api/v1/workflows", json=forged_ownership)
+    assert forged_creation.status_code == 422
 
 
 def test_execution_create_start_get_list_and_task_results(api) -> None:
