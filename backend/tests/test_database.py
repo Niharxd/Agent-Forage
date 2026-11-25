@@ -2,6 +2,7 @@ import hashlib
 import os
 import secrets
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -336,6 +337,352 @@ def test_postgres_api_cross_workspace_workflow_access_is_denied(
         assert unauthenticated.get(f"/api/v1/workflows/{workflow_id}").status_code == 401
         unauthenticated.cookies.set(USER_SESSION_COOKIE, "forged.invalid.cookie")
         assert unauthenticated.get(f"/api/v1/workflows/{workflow_id}").status_code == 401
+
+
+def test_postgres_api_execution_and_approval_access_is_workspace_scoped(
+    migrated_database: Engine,
+) -> None:
+    password = "StrongPassword123"
+    origin = "http://localhost:5173"
+    token = "execution-isolation-operator-token"
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        cors_origins=[origin],
+        api_access_token=SecretStr(token),
+        session_signing_secret=SecretStr("i" * 40),
+        test_database_url=TEST_DATABASE_URL,
+    )
+    application = create_app(settings)
+
+    def db_session_override() -> Iterator[Session]:
+        with Session(migrated_database) as session:
+            yield session
+
+    application.dependency_overrides[get_db_session] = db_session_override
+    executed_actions: list[object] = []
+
+    def guarded_handler(payload: object) -> dict[str, bool]:
+        executed_actions.append(payload)
+        return {"ok": True}
+
+    registry = ToolRegistry(
+        [
+            ToolDefinition(
+                tool_id="workspace_guarded",
+                name="workspace_guarded",
+                description="An approval-gated test action.",
+                required_capabilities={AgentCapability.ANALYZE_SUPPLIED_DATA},
+                requires_approval=True,
+                handler=guarded_handler,
+            )
+        ]
+    )
+    email_a = f"execution-a-{uuid4().hex}@example.com"
+    email_b = f"execution-b-{uuid4().hex}@example.com"
+
+    with TestClient(application) as registration_client:
+        registration_a = registration_client.post(
+            "/api/v1/auth/register",
+            json={"email": email_a, "password": password},
+            headers={"Origin": origin},
+        )
+        registration_b = registration_client.post(
+            "/api/v1/auth/register",
+            json={"email": email_b, "password": password},
+            headers={"Origin": origin},
+        )
+    assert registration_a.status_code == 201
+    assert registration_b.status_code == 201
+
+    with TestClient(application) as client_a, TestClient(application) as client_b:
+        login_a = client_a.post(
+            "/api/v1/auth/login",
+            json={"email": email_a, "password": password},
+            headers={"Origin": origin},
+        )
+        login_b = client_b.post(
+            "/api/v1/auth/login",
+            json={"email": email_b, "password": password},
+            headers={"Origin": origin},
+        )
+        assert login_a.status_code == 200
+        assert login_b.status_code == 200
+        application.state.workflow_engine = WorkflowEngine(
+            tool_executor=ToolExecutor(registry),
+            settings=settings,
+        )
+
+        workflow_a = client_a.post(
+            "/api/v1/workflows",
+            json={
+                "name": f"approval-workflow-{uuid4().hex}",
+                "tasks": [
+                    {
+                        "task_id": "guarded",
+                        "agent_type": "analyst",
+                        "tool_request": {
+                            "tool_id": "workspace_guarded",
+                            "arguments": {"message": "must not run before approval"},
+                        },
+                    }
+                ],
+            },
+        )
+        workflow_b = client_b.post(
+            "/api/v1/workflows",
+            json={
+                "name": f"private-workflow-{uuid4().hex}",
+                "tasks": [
+                    {
+                        "task_id": "guarded",
+                        "agent_type": "analyst",
+                        "tool_request": {
+                            "tool_id": "workspace_guarded",
+                            "arguments": {"message": "workspace B action"},
+                        },
+                    }
+                ],
+            },
+        )
+        assert workflow_a.status_code == 201, workflow_a.text
+        assert workflow_b.status_code == 201, workflow_b.text
+
+        execution_a = client_a.post(f"/api/v1/workflows/{workflow_a.json()['id']}/executions")
+        execution_b = client_b.post(f"/api/v1/workflows/{workflow_b.json()['id']}/executions")
+        assert execution_a.status_code == 201, execution_a.text
+        assert execution_b.status_code == 201, execution_b.text
+        execution_a_id = execution_a.json()["execution_id"]
+        execution_b_id = execution_b.json()["execution_id"]
+
+        started_a = client_a.post(f"/api/v1/executions/{execution_a_id}/start")
+        started_b = client_b.post(f"/api/v1/executions/{execution_b_id}/start")
+        assert started_a.status_code == 200, started_a.text
+        assert started_b.status_code == 200, started_b.text
+        assert started_a.json()["status"] == WorkflowStatus.WAITING_APPROVAL.value
+        assert started_b.json()["status"] == WorkflowStatus.WAITING_APPROVAL.value
+        approval_list = client_a.get(f"/api/v1/executions/{execution_a_id}/approvals")
+        approval_list_b = client_b.get(f"/api/v1/executions/{execution_b_id}/approvals")
+        assert approval_list.status_code == 200
+        assert approval_list_b.status_code == 200
+        approval_id = approval_list.json()[0]["approval_id"]
+        approval_b_id = approval_list_b.json()[0]["approval_id"]
+        with Session(migrated_database) as session:
+            initial_event_counts = {
+                execution_a_id: session.scalar(
+                    select(func.count())
+                    .select_from(ExecutionEvent)
+                    .where(ExecutionEvent.execution_id == UUID(execution_a_id))
+                ),
+                execution_b_id: session.scalar(
+                    select(func.count())
+                    .select_from(ExecutionEvent)
+                    .where(ExecutionEvent.execution_id == UUID(execution_b_id))
+                ),
+            }
+
+        assert client_b.get(f"/api/v1/executions/{execution_a_id}").status_code == 404
+        assert client_a.get(f"/api/v1/executions/{execution_b_id}").status_code == 404
+        assert client_b.get(f"/api/v1/executions/{execution_a_id}/approvals").status_code == 404
+        assert client_a.get(f"/api/v1/executions/{execution_b_id}/approvals").status_code == 404
+        assert client_b.post(f"/api/v1/executions/{execution_a_id}/start").status_code == 404
+        assert client_b.post(f"/api/v1/executions/{execution_a_id}/cancel").status_code == 404
+        assert client_a.post(f"/api/v1/executions/{execution_b_id}/cancel").status_code == 404
+        assert (
+            client_b.post(
+                f"/api/v1/executions/{execution_a_id}/approvals/{approval_id}/approve"
+            ).status_code
+            == 404
+        )
+        assert (
+            client_b.post(
+                f"/api/v1/executions/{execution_a_id}/approvals/{approval_id}/reject"
+            ).status_code
+            == 404
+        )
+        assert (
+            client_a.post(
+                f"/api/v1/executions/{execution_b_id}/approvals/{approval_id}/approve"
+            ).status_code
+            == 404
+        )
+        assert (
+            client_a.post(
+                f"/api/v1/executions/{execution_a_id}/approvals/{approval_b_id}/approve"
+            ).status_code
+            == 404
+        )
+        assert (
+            client_b.post(
+                f"/api/v1/executions/{execution_b_id}/approvals/{approval_id}/approve"
+            ).status_code
+            == 404
+        )
+
+        list_a = client_a.get(
+            "/api/v1/executions",
+            params={
+                "workspace_id": registration_b.json()["workspace_id"],
+                "user_id": registration_b.json()["user"]["id"],
+            },
+        )
+        list_b = client_b.get(
+            "/api/v1/executions",
+            params={
+                "workspace_id": registration_a.json()["workspace_id"],
+                "user_id": registration_a.json()["user"]["id"],
+            },
+        )
+        assert list_a.status_code == 200
+        assert list_b.status_code == 200
+        assert {item["execution_id"] for item in list_a.json()["items"]} == {execution_a_id}
+        assert {item["execution_id"] for item in list_b.json()["items"]} == {execution_b_id}
+
+        with Session(migrated_database) as session:
+            persisted_execution_a = session.get(WorkflowExecution, UUID(execution_a_id))
+            persisted_execution_b = session.get(WorkflowExecution, UUID(execution_b_id))
+            persisted_approval = session.get(ApprovalRequest, UUID(approval_id))
+            latest_event = session.scalar(
+                select(ExecutionEvent)
+                .where(ExecutionEvent.execution_id == UUID(execution_a_id))
+                .order_by(ExecutionEvent.sequence_number.desc())
+                .limit(1)
+            )
+            assert persisted_execution_a is not None
+            assert persisted_execution_b is not None
+            assert persisted_approval is not None
+            assert latest_event is not None
+            assert persisted_execution_a.workspace_id == UUID(registration_a.json()["workspace_id"])
+            assert persisted_execution_b.workspace_id == UUID(registration_b.json()["workspace_id"])
+            assert persisted_execution_a.workflow_id == UUID(workflow_a.json()["id"])
+            assert persisted_execution_b.workflow_id == UUID(workflow_b.json()["id"])
+            assert persisted_execution_a.status == WorkflowStatus.WAITING_APPROVAL.value
+            assert persisted_execution_a.created_by_user_id == UUID(
+                registration_a.json()["user"]["id"]
+            )
+            assert persisted_execution_a.started_by_user_id == UUID(
+                registration_a.json()["user"]["id"]
+            )
+            assert latest_event.actor == f"user:{registration_a.json()['user']['id']}"
+            assert persisted_execution_b.status == WorkflowStatus.WAITING_APPROVAL.value
+            assert persisted_approval.status == "pending"
+            persisted_approval_b = session.get(ApprovalRequest, UUID(approval_b_id))
+            assert persisted_approval_b is not None
+            assert persisted_approval_b.status == "pending"
+            for execution_id, event_count in initial_event_counts.items():
+                assert (
+                    session.scalar(
+                        select(func.count())
+                        .select_from(ExecutionEvent)
+                        .where(ExecutionEvent.execution_id == UUID(execution_id))
+                    )
+                    == event_count
+                )
+            assert executed_actions == []
+
+        member_id = UUID(registration_a.json()["user"]["id"])
+        workspace_a_id = UUID(registration_a.json()["workspace_id"])
+        with Session(migrated_database) as session:
+            membership = session.scalar(
+                select(WorkspaceMembership).where(
+                    WorkspaceMembership.user_id == member_id,
+                    WorkspaceMembership.workspace_id == workspace_a_id,
+                )
+            )
+            assert membership is not None
+            membership.role = "member"
+            session.commit()
+
+        assert (
+            client_a.post(
+                f"/api/v1/executions/{execution_a_id}/approvals/{approval_id}/approve"
+            ).status_code
+            == 403
+        )
+        assert (
+            client_a.post(
+                f"/api/v1/executions/{execution_a_id}/approvals/{approval_id}/reject"
+            ).status_code
+            == 403
+        )
+        with Session(migrated_database) as session:
+            persisted_execution_a = session.get(WorkflowExecution, UUID(execution_a_id))
+            persisted_approval = session.get(ApprovalRequest, UUID(approval_id))
+            assert persisted_execution_a is not None
+            assert persisted_approval is not None
+            assert persisted_execution_a.status == WorkflowStatus.WAITING_APPROVAL.value
+            assert persisted_approval.status == "pending"
+            assert executed_actions == []
+
+            membership = session.scalar(
+                select(WorkspaceMembership).where(
+                    WorkspaceMembership.user_id == member_id,
+                    WorkspaceMembership.workspace_id == workspace_a_id,
+                )
+            )
+            assert membership is not None
+            membership.role = "admin"
+            session.commit()
+
+        session_cookie = client_a.cookies.get(USER_SESSION_COOKIE)
+        assert session_cookie is not None
+        decision_url = f"/api/v1/executions/{execution_a_id}/approvals/{approval_id}"
+        decision_url_b = f"/api/v1/executions/{execution_b_id}/approvals/{approval_b_id}"
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            concurrent_results = list(
+                pool.map(
+                    lambda args: args[0].post(args[1]),
+                    [
+                        (client_a, f"{decision_url}/approve"),
+                        (client_a, f"{decision_url}/reject"),
+                        (client_b, f"{decision_url_b}/approve"),
+                    ],
+                )
+            )
+
+        assert sorted(response.status_code for response in concurrent_results) == [200, 200, 409], [
+            (response.status_code, response.text) for response in concurrent_results
+        ]
+        winning_response = next(
+            response
+            for response in concurrent_results
+            if response.status_code == 200 and f"/{execution_a_id}/" in response.request.url.path
+        )
+        expected_status = (
+            "approved" if winning_response.request.url.path.endswith("/approve") else "rejected"
+        )
+        expected_actions = [{"message": "workspace B action"}]
+        if expected_status == "approved":
+            expected_actions.append({"message": "must not run before approval"})
+        assert sorted(action["message"] for action in executed_actions) == sorted(
+            action["message"] for action in expected_actions
+        )
+
+    with Session(migrated_database) as session:
+        persisted_execution_a = session.get(WorkflowExecution, UUID(execution_a_id))
+        persisted_execution_b = session.get(WorkflowExecution, UUID(execution_b_id))
+        persisted_approval = session.get(ApprovalRequest, UUID(approval_id))
+        latest_event = session.scalar(
+            select(ExecutionEvent)
+            .where(ExecutionEvent.execution_id == UUID(execution_a_id))
+            .order_by(ExecutionEvent.sequence_number.desc())
+            .limit(1)
+        )
+        assert persisted_execution_a is not None
+        assert persisted_execution_b is not None
+        assert persisted_approval is not None
+        assert latest_event is not None
+        assert persisted_execution_a.status == (
+            WorkflowStatus.COMPLETED.value
+            if expected_status == "approved"
+            else WorkflowStatus.FAILED.value
+        )
+        assert persisted_execution_b.status == WorkflowStatus.COMPLETED.value
+        assert persisted_approval.status == expected_status
+        assert latest_event.actor == f"user:{registration_a.json()['user']['id']}"
+        persisted_approval_b = session.get(ApprovalRequest, UUID(approval_b_id))
+        assert persisted_approval_b is not None
+        assert persisted_approval_b.status == "approved"
 
 
 def test_inactive_workspace_membership_is_rejected(
@@ -1450,10 +1797,15 @@ def test_event_failure_does_not_report_durable_success_or_leave_partial_state(
         )
         insert_events = repository._insert_events
 
-        def fail_on_task_completion(events, *, start_sequence: int = 1) -> None:
+        def fail_on_task_completion(
+            events,
+            *,
+            start_sequence: int = 1,
+            actor: str = "system",
+        ) -> None:
             if any(event.event_type == WorkflowEventType.TASK_COMPLETED for event in events):
                 raise RuntimeError("controlled event insert failure")
-            insert_events(events, start_sequence=start_sequence)
+            insert_events(events, start_sequence=start_sequence, actor=actor)
 
         monkeypatch.setattr(repository, "_insert_events", fail_on_task_completion)
         with pytest.raises(ExecutionPersistenceError):
@@ -1478,10 +1830,15 @@ def test_terminal_persistence_failure_does_not_report_durable_completion(
         )
         insert_events = repository._insert_events
 
-        def fail_on_workflow_completion(events, *, start_sequence: int = 1) -> None:
+        def fail_on_workflow_completion(
+            events,
+            *,
+            start_sequence: int = 1,
+            actor: str = "system",
+        ) -> None:
             if any(event.event_type == WorkflowEventType.WORKFLOW_COMPLETED for event in events):
                 raise RuntimeError("controlled terminal event insert failure")
-            insert_events(events, start_sequence=start_sequence)
+            insert_events(events, start_sequence=start_sequence, actor=actor)
 
         monkeypatch.setattr(repository, "_insert_events", fail_on_workflow_completion)
         with pytest.raises(ExecutionPersistenceError):
@@ -2107,7 +2464,13 @@ def test_approval_api_auth_binding_review_and_health(
         failed_execution, failed_approval = start_waiting_execution()
         with monkeypatch.context() as patch_context:
 
-            def fail_decision(_repository, _approval_id: UUID, *, commit: bool = True):
+            def fail_decision(
+                _repository,
+                _approval_id: UUID,
+                *,
+                commit: bool = True,
+                **_kwargs,
+            ):
                 raise ExecutionPersistenceError("controlled API persistence failure")
 
             patch_context.setattr(ExecutionRepository, "approve_approval_request", fail_decision)
@@ -2121,7 +2484,7 @@ def test_approval_api_auth_binding_review_and_health(
         failed_execution, failed_approval = start_waiting_execution()
         with monkeypatch.context() as patch_context:
 
-            def fail_execution_update(_repository, _snapshot) -> None:
+            def fail_execution_update(_repository, _snapshot, **_kwargs) -> None:
                 raise ExecutionPersistenceError("controlled execution transaction failure")
 
             patch_context.setattr(

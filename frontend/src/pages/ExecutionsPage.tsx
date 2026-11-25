@@ -16,6 +16,7 @@ const PAGE_SIZE = 25;
 const statusLabels: Record<ExecutionStatus, string> = {
   pending: "Pending",
   running: "Running",
+  waiting_approval: "Awaiting approval",
   completed: "Completed",
   failed: "Failed",
   cancelled: "Cancelled",
@@ -26,6 +27,7 @@ function statusTone(status: ExecutionStatus): "blue" | "violet" | "green" | "red
     case "pending":
       return "blue";
     case "running":
+    case "waiting_approval":
       return "violet";
     case "completed":
       return "green";
@@ -117,7 +119,7 @@ function ExecutionDetails({ execution, onChanged }: { execution: Execution; onCh
 
       <div className="flex flex-wrap items-center gap-2">
         {execution.status === "pending" && <Button onClick={() => void runAction("start")} disabled={acting}>{acting ? "Starting…" : "Start execution"}</Button>}
-        {(execution.status === "pending" || execution.status === "running") && <Button variant="secondary" onClick={() => void runAction("cancel")} disabled={acting}>{acting ? "Updating…" : "Cancel execution"}</Button>}
+        {(execution.status === "pending" || execution.status === "running" || execution.status === "waiting_approval") && <Button variant="secondary" onClick={() => void runAction("cancel")} disabled={acting}>{acting ? "Updating…" : "Cancel execution"}</Button>}
         {actionError && <span role="alert" className="text-xs text-[var(--error)]">{actionError}</span>}
       </div>
 
@@ -369,6 +371,7 @@ export default function ExecutionsPage() {
               { value: "all", label: "All statuses" },
               { value: "pending", label: "Pending" },
               { value: "running", label: "Running" },
+              { value: "waiting_approval", label: "Awaiting approval" },
               { value: "completed", label: "Completed" },
               { value: "failed", label: "Failed" },
               { value: "cancelled", label: "Cancelled" },

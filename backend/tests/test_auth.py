@@ -27,7 +27,7 @@ def test_operator_login_restores_and_logs_out_session(monkeypatch) -> None:
         def __init__(self, _session):
             pass
 
-        def get_execution(self, _execution_id):
+        def get_execution(self, _execution_id, **_kwargs):
             return object()
 
         def get_approval_requests(self, **_kwargs):
@@ -212,12 +212,24 @@ def test_approval_list_rejects_unauthenticated_operator() -> None:
         assert response.status_code == 401
 
 
+def test_invalid_public_user_session_cannot_enter_operator_approval_path() -> None:
+    with client() as test_client:
+        test_client.cookies.set("agentforge_user_session", "forged.invalid.cookie")
+        response = test_client.get(
+            "/api/v1/executions/00000000-0000-0000-0000-000000000000/approvals"
+        )
+        assert response.status_code == 401
+
+
 def test_approval_session_requires_origin_for_state_change(monkeypatch) -> None:
     class ApprovalRepository:
         def __init__(self, _session):
             pass
 
-        def get_approval_request_by_id(self, _approval_id):
+        def get_execution(self, _execution_id, **_kwargs):
+            return object()
+
+        def get_approval_for_execution(self, _approval_id, **_kwargs):
             return None
 
     monkeypatch.setattr(execution_routes, "ExecutionRepository", ApprovalRepository)
@@ -243,7 +255,7 @@ def test_session_authentication_preserves_openai_router_protection(monkeypatch) 
         def __init__(self, _session):
             pass
 
-        def get_execution(self, _execution_id):
+        def get_execution(self, _execution_id, **_kwargs):
             return object()
 
         def get_approval_requests(self, **_kwargs):

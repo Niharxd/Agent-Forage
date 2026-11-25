@@ -4,9 +4,12 @@ import hashlib
 import json
 import logging
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from datetime import UTC, datetime
 from threading import RLock
+from typing import Any, Protocol
 from uuid import UUID, uuid4
 
 from agentforge.agents import AnalystAgent, PlannerAgent, ResearcherAgent, ReviewerAgent
@@ -70,6 +73,44 @@ _SAFE_AGENT_ERROR_MESSAGES = {
 }
 
 
+class PersistedApproval(Protocol):
+    expires_at: datetime
+
+
+class ApprovalRepository(Protocol):
+    def create_approval_request(
+        self,
+        *,
+        approval_id: UUID,
+        execution_id: UUID,
+        execution_step_id: UUID | None,
+        tool_id: str | None,
+        action_description: str,
+        action_digest: str,
+        safe_arguments: dict[str, Any],
+    ) -> PersistedApproval: ...
+
+    def get_execution_step_id(self, *, execution_id: UUID, task_id: str) -> UUID | None: ...
+
+    def approve_approval_request(
+        self,
+        approval_id: UUID,
+        *,
+        execution_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        commit: bool = True,
+    ) -> object: ...
+
+    def reject_approval_request(
+        self,
+        approval_id: UUID,
+        *,
+        execution_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        commit: bool = True,
+    ) -> object: ...
+
+
 class ExecutionNotFoundError(LookupError):
     """Raised when an execution ID is absent from both active state and history."""
 
@@ -88,7 +129,7 @@ class WorkflowEngine:
         validator: WorkflowValidator | None = None,
         settings: Settings | None = None,
         tool_executor: ToolExecutor | None = None,
-        approval_repository: object | None = None,
+        approval_repository: ApprovalRepository | None = None,
     ) -> None:
         settings = settings or Settings()
         self._agents = dict(agents) if agents is not None else self._configured_agents(settings)
@@ -116,11 +157,48 @@ class WorkflowEngine:
         self._approval_registry: dict[str, ApprovalGrant] = {}
         self._tool_executor.approval_registry = self._approval_registry  # type: ignore[attr-defined]
         self._approval_repository = approval_repository
+        self._request_approval_context: ContextVar[
+            tuple[ApprovalRepository, UUID | None] | None
+        ] = ContextVar(
+            "workflow_approval_repository",
+            default=None,
+        )
 
     @property
     def planner(self) -> Agent:
         """Return the Planner registered for this engine's configured provider mode."""
         return self._agents[AgentRole.PLANNER]
+
+    @contextmanager
+    def use_approval_repository(
+        self,
+        repository: ApprovalRepository,
+        *,
+        workspace_id: UUID | None = None,
+    ) -> Iterator[None]:
+        """Bind persistence to this request context without sharing it across concurrent calls."""
+        token: Token[tuple[ApprovalRepository, UUID | None] | None] = (
+            self._request_approval_context.set((repository, workspace_id))
+        )
+        try:
+            yield
+        finally:
+            self._request_approval_context.reset(token)
+
+    def _current_approval_context(self) -> tuple[ApprovalRepository | None, UUID | None]:
+        context = self._request_approval_context.get()
+        if context is not None:
+            return context
+        return self._approval_repository, None
+
+    @staticmethod
+    def _approval_decision_scope(
+        execution_id: UUID,
+        workspace_id: UUID | None,
+    ) -> dict[str, UUID]:
+        if workspace_id is None:
+            return {}
+        return {"execution_id": execution_id, "workspace_id": workspace_id}
 
     def create_execution(
         self,
@@ -346,6 +424,7 @@ class WorkflowEngine:
         on_update: ExecutionUpdateCallback | None = None,
     ) -> WorkflowExecution:
         """Grant or reject a pending tool approval request and resume the execution."""
+        approval_repository, workspace_id = self._current_approval_context()
         with self._lock:
             execution = self._active_execution(execution_id)
             if execution.status != WorkflowStatus.WAITING_APPROVAL:
@@ -379,9 +458,10 @@ class WorkflowEngine:
                 )
 
             if not approved:
-                if self._approval_repository is not None:
-                    self._approval_repository.reject_approval_request(
+                if approval_repository is not None:
+                    approval_repository.reject_approval_request(
                         grant.approval_id,
+                        **self._approval_decision_scope(execution_id, workspace_id),
                         commit=on_update is None,
                     )
                 tool_result = execution.task_results[selected_task.task_id].tool_result
@@ -431,9 +511,10 @@ class WorkflowEngine:
                 self._archive(execution)
                 return execution.model_copy(deep=True)
 
-            if self._approval_repository is not None:
-                self._approval_repository.approve_approval_request(
+            if approval_repository is not None:
+                approval_repository.approve_approval_request(
                     grant.approval_id,
+                    **self._approval_decision_scope(execution_id, workspace_id),
                     commit=on_update is None,
                 )
             execution_backup = execution.model_copy(deep=True)
@@ -498,6 +579,7 @@ class WorkflowEngine:
         on_update: ExecutionUpdateCallback | None = None,
     ) -> WorkflowExecutionSnapshot:
         """Cancel pending work or request cooperative cancellation between tasks."""
+        approval_repository, workspace_id = self._current_approval_context()
         with self._lock:
             execution = self._active_execution(execution_id)
             if execution.status == WorkflowStatus.PENDING:
@@ -553,8 +635,11 @@ class WorkflowEngine:
                     for task in waiting_tasks
                 ]
                 for grant in grants:
-                    if grant is not None and self._approval_repository is not None:
-                        self._approval_repository.reject_approval_request(UUID(grant.approval_id))
+                    if grant is not None and approval_repository is not None:
+                        approval_repository.reject_approval_request(
+                            UUID(grant.approval_id),
+                            **self._approval_decision_scope(execution_id, workspace_id),
+                        )
                 completed_at = self._now()
                 execution.transition_to(WorkflowStatus.CANCELLED)
                 execution.completed_at = completed_at
@@ -1270,11 +1355,12 @@ class WorkflowEngine:
         )
         # Persist the pending approval request durably so it survives
         # application restart and can be validated against the database.
-        if self._approval_repository is not None:
-            approval = self._approval_repository.create_approval_request(
+        approval_repository, _workspace_id = self._current_approval_context()
+        if approval_repository is not None:
+            approval = approval_repository.create_approval_request(
                 approval_id=UUID(grant.approval_id),
                 execution_id=execution.execution_id,
-                execution_step_id=self._approval_repository.get_execution_step_id(
+                execution_step_id=approval_repository.get_execution_step_id(
                     execution_id=execution.execution_id,
                     task_id=task.task_id,
                 ),

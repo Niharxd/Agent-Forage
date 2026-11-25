@@ -7,8 +7,8 @@ import { EmptyState } from "../components/EmptyState";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 
-const tones: Record<ExecutionStatus, "blue" | "violet" | "green" | "red" | "neutral"> = { pending: "blue", running: "violet", completed: "green", failed: "red", cancelled: "neutral" };
-const labels: Record<ExecutionStatus, string> = { pending: "Pending", running: "Running", completed: "Completed", failed: "Failed", cancelled: "Cancelled" };
+const tones: Record<ExecutionStatus, "blue" | "violet" | "green" | "red" | "neutral"> = { pending: "blue", running: "violet", waiting_approval: "violet", completed: "green", failed: "red", cancelled: "neutral" };
+const labels: Record<ExecutionStatus, string> = { pending: "Pending", running: "Running", waiting_approval: "Awaiting approval", completed: "Completed", failed: "Failed", cancelled: "Cancelled" };
 function stamp(value: string) { const date = new Date(value); return Number.isNaN(+date) ? "Unknown time" : date.toLocaleString(); }
 
 export default function DashboardPage() {

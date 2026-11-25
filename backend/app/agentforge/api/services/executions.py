@@ -35,6 +35,10 @@ class ExecutionAlreadyExistsError(ExecutionPersistenceError):
     """Raised when an execution identifier is already durably registered."""
 
 
+class ApprovalDecisionConflictError(ExecutionPersistenceError):
+    """Raised when an approval has already expired or received a decision."""
+
+
 _EVENT_DETAILS = {
     WorkflowEventType.WORKFLOW_CREATED: {"workflow_name", "task_count"},
     WorkflowEventType.WORKFLOW_STARTED: {"workflow_name", "task_count"},
@@ -57,6 +61,7 @@ _TERMINAL_WORKFLOW_STATUSES = {
 _API_WORKFLOW_STATUSES = {
     WorkflowStatus.PENDING.value,
     WorkflowStatus.RUNNING.value,
+    WorkflowStatus.WAITING_APPROVAL.value,
     WorkflowStatus.COMPLETED.value,
     WorkflowStatus.FAILED.value,
     WorkflowStatus.CANCELLED.value,
@@ -80,12 +85,22 @@ class ExecutionRepository:
         workflow_version: int,
         definition: WorkflowDefinition,
         original_task: str | None = None,
+        workspace_id: UUID | None = None,
+        created_by_user_id: UUID | None = None,
+        actor_user_id: UUID | None = None,
     ) -> None:
         """Atomically insert an execution, its initial steps, and its creation event."""
         try:
-            workflow = self._session.get(Workflow, workflow_id)
+            workflow_statement = select(Workflow).where(Workflow.id == workflow_id)
+            if workspace_id is not None:
+                workflow_statement = workflow_statement.where(Workflow.workspace_id == workspace_id)
+            workflow = self._session.scalar(workflow_statement)
             if workflow is None:
                 raise ExecutionPersistenceError("The referenced workflow version does not exist.")
+            if workspace_id is not None and workflow.workspace_id != workspace_id:
+                raise ExecutionPersistenceError(
+                    "The referenced workflow workspace is inconsistent."
+                )
             if workflow.version != workflow_version:
                 raise ExecutionPersistenceError("The referenced workflow version is inconsistent.")
             if self._session.get(WorkflowExecution, snapshot.execution_id) is not None:
@@ -95,7 +110,7 @@ class ExecutionRepository:
                 id=snapshot.execution_id,
                 workflow_id=workflow_id,
                 workspace_id=workflow.workspace_id,
-                created_by_user_id=workflow.created_by_user_id,
+                created_by_user_id=created_by_user_id or workflow.created_by_user_id,
                 original_task=(
                     original_task
                     if original_task is not None
@@ -123,7 +138,10 @@ class ExecutionRepository:
                     for task in definition.tasks
                 ]
             )
-            self._insert_events(snapshot.events)
+            self._insert_events(
+                snapshot.events,
+                actor=f"user:{actor_user_id}" if actor_user_id is not None else "system",
+            )
             self._session.commit()
         except ExecutionPersistenceError:
             self._session.rollback()
@@ -132,14 +150,23 @@ class ExecutionRepository:
             self._session.rollback()
             raise ExecutionPersistenceError("The initial execution transaction failed.") from exc
 
-    def synchronize_execution(self, snapshot: WorkflowExecutionSnapshot) -> None:
+    def synchronize_execution(
+        self,
+        snapshot: WorkflowExecutionSnapshot,
+        *,
+        workspace_id: UUID | None = None,
+        actor_user_id: UUID | None = None,
+    ) -> None:
         """Persist the next state and its newly appended audit events atomically."""
         try:
-            record = self._session.scalar(
-                select(WorkflowExecution)
-                .where(WorkflowExecution.id == snapshot.execution_id)
-                .with_for_update()
+            execution_statement = select(WorkflowExecution).where(
+                WorkflowExecution.id == snapshot.execution_id
             )
+            if workspace_id is not None:
+                execution_statement = execution_statement.where(
+                    WorkflowExecution.workspace_id == workspace_id
+                )
+            record = self._session.scalar(execution_statement.with_for_update())
             if record is None:
                 raise ExecutionPersistenceError("The durable execution record is missing.")
 
@@ -172,6 +199,12 @@ class ExecutionRepository:
             record.status = snapshot.status.value
             record.started_at = snapshot.started_at
             record.completed_at = snapshot.completed_at
+            if record.started_by_user_id is None and snapshot.started_at is not None:
+                record.started_by_user_id = actor_user_id
+            if record.cancelled_by_user_id is None and (
+                snapshot.cancellation_requested or snapshot.status == WorkflowStatus.CANCELLED
+            ):
+                record.cancelled_by_user_id = actor_user_id
             if snapshot.status in _TERMINAL_WORKFLOW_STATUSES:
                 final_event = snapshot.events[-1]
                 record.terminal_reason = final_event.reason
@@ -185,7 +218,9 @@ class ExecutionRepository:
                 step.error_message = result.error.message if result.error else None
 
             self._insert_events(
-                snapshot.events[current_sequence:], start_sequence=current_sequence + 1
+                snapshot.events[current_sequence:],
+                start_sequence=current_sequence + 1,
+                actor=f"user:{actor_user_id}" if actor_user_id is not None else "system",
             )
             self._session.commit()
         except ExecutionPersistenceError:
@@ -263,53 +298,99 @@ class ExecutionRepository:
         return approval
 
     def approve_approval_request(
-        self, approval_id: UUID, *, commit: bool = True
+        self,
+        approval_id: UUID,
+        *,
+        execution_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        commit: bool = True,
     ) -> ApprovalRequest:
         """Mark a pending approval request as approved and record the review time."""
-        approval = self._session.scalar(
-            select(ApprovalRequest).where(ApprovalRequest.id == approval_id).with_for_update()
+        approval = self._lock_approval_request(
+            approval_id,
+            execution_id=execution_id,
+            workspace_id=workspace_id,
         )
         if approval is None:
             raise ExecutionPersistenceError(f"Approval request {approval_id} was not found.")
         if approval.status != "pending":
-            raise ExecutionPersistenceError(
+            raise ApprovalDecisionConflictError(
                 f"Approval request {approval_id} is not pending (status={approval.status!r})."
             )
         if approval.expires_at <= datetime.now(UTC):
             approval.status = "expired"
             approval.reviewed_at = datetime.now(UTC)
             self._finish_approval_decision(commit=commit)
-            raise ExecutionPersistenceError(f"Approval request {approval_id} has expired.")
+            raise ApprovalDecisionConflictError(f"Approval request {approval_id} has expired.")
         approval.status = "approved"
         approval.reviewed_at = datetime.now(UTC)
         self._finish_approval_decision(commit=commit)
         return approval
 
-    def reject_approval_request(self, approval_id: UUID, *, commit: bool = True) -> ApprovalRequest:
+    def reject_approval_request(
+        self,
+        approval_id: UUID,
+        *,
+        execution_id: UUID | None = None,
+        workspace_id: UUID | None = None,
+        commit: bool = True,
+    ) -> ApprovalRequest:
         """Mark a pending approval request as rejected and record the review time."""
-        approval = self._session.scalar(
-            select(ApprovalRequest).where(ApprovalRequest.id == approval_id).with_for_update()
+        approval = self._lock_approval_request(
+            approval_id,
+            execution_id=execution_id,
+            workspace_id=workspace_id,
         )
         if approval is None:
             raise ExecutionPersistenceError(f"Approval request {approval_id} was not found.")
         if approval.status != "pending":
-            raise ExecutionPersistenceError(
+            raise ApprovalDecisionConflictError(
                 f"Approval request {approval_id} is not pending (status={approval.status!r})."
             )
         if approval.expires_at <= datetime.now(UTC):
             approval.status = "expired"
             approval.reviewed_at = datetime.now(UTC)
             self._finish_approval_decision(commit=commit)
-            raise ExecutionPersistenceError(f"Approval request {approval_id} has expired.")
+            raise ApprovalDecisionConflictError(f"Approval request {approval_id} has expired.")
         approval.status = "rejected"
         approval.reviewed_at = datetime.now(UTC)
         self._finish_approval_decision(commit=commit)
         return approval
 
-    def expire_approval_request(self, approval_id: UUID, *, commit: bool = True) -> ApprovalRequest:
+    def _lock_approval_request(
+        self,
+        approval_id: UUID,
+        *,
+        execution_id: UUID | None,
+        workspace_id: UUID | None,
+    ) -> ApprovalRequest | None:
+        if (execution_id is None) != (workspace_id is None):
+            raise ValueError("execution_id and workspace_id must be provided together.")
+        if execution_id is None or workspace_id is None:
+            statement = select(ApprovalRequest).where(ApprovalRequest.id == approval_id)
+        else:
+            statement = self._approval_statement(
+                execution_id=execution_id,
+                workspace_id=workspace_id,
+            ).where(ApprovalRequest.id == approval_id)
+        return self._session.scalar(statement.with_for_update(of=ApprovalRequest))
+
+    def expire_approval_request(
+        self,
+        approval_id: UUID,
+        *,
+        execution_id: UUID,
+        workspace_id: UUID,
+        commit: bool = True,
+    ) -> ApprovalRequest:
         """Mark a still-pending approval as expired."""
         approval = self._session.scalar(
-            select(ApprovalRequest).where(ApprovalRequest.id == approval_id).with_for_update()
+            self._approval_statement(
+                execution_id=execution_id,
+                workspace_id=workspace_id,
+            )
+            .where(ApprovalRequest.id == approval_id)
+            .with_for_update(of=ApprovalRequest)
         )
         if approval is None:
             raise ExecutionPersistenceError(f"Approval request {approval_id} was not found.")
@@ -331,22 +412,38 @@ class ExecutionRepository:
 
     def get_pending_approval_requests(self, *, execution_id: UUID) -> list[ApprovalRequest]:
         """Return all pending approval requests for an execution."""
-        self._expire_pending_approvals(execution_id=execution_id)
+        workspace_id = self._session.scalar(
+            select(WorkflowExecution.workspace_id)
+            .join(
+                Workflow,
+                (WorkflowExecution.workflow_id == Workflow.id)
+                & (WorkflowExecution.workspace_id == Workflow.workspace_id),
+            )
+            .where(WorkflowExecution.id == execution_id)
+        )
+        if workspace_id is None:
+            return []
+        self._expire_pending_approvals(
+            execution_id=execution_id,
+            workspace_id=workspace_id,
+        )
         return list(
             self._session.scalars(
-                select(ApprovalRequest).where(
-                    ApprovalRequest.execution_id == execution_id,
-                    ApprovalRequest.status == "pending",
-                )
+                self._approval_statement(
+                    execution_id=execution_id,
+                    workspace_id=workspace_id,
+                ).where(ApprovalRequest.status == "pending")
             )
         )
 
-    def _expire_pending_approvals(self, *, execution_id: UUID) -> None:
+    def _expire_pending_approvals(self, *, execution_id: UUID, workspace_id: UUID) -> None:
         now = datetime.now(UTC)
         stale = list(
             self._session.scalars(
-                select(ApprovalRequest).where(
-                    ApprovalRequest.execution_id == execution_id,
+                self._approval_statement(
+                    execution_id=execution_id,
+                    workspace_id=workspace_id,
+                ).where(
                     ApprovalRequest.status == "pending",
                     ApprovalRequest.expires_at <= now,
                 )
@@ -358,14 +455,63 @@ class ExecutionRepository:
                 approval.reviewed_at = now
             self._session.flush()
 
-    def get_approval_requests(self, *, execution_id: UUID) -> list[ApprovalRequest]:
+    def get_approval_requests(
+        self,
+        *,
+        execution_id: UUID,
+        workspace_id: UUID,
+    ) -> list[ApprovalRequest]:
         """Return approval rows for one execution, newest first."""
-        self._expire_pending_approvals(execution_id=execution_id)
+        self._expire_pending_approvals(execution_id=execution_id, workspace_id=workspace_id)
         return list(
             self._session.scalars(
-                select(ApprovalRequest)
-                .where(ApprovalRequest.execution_id == execution_id)
-                .order_by(ApprovalRequest.requested_at.desc())
+                self._approval_statement(
+                    execution_id=execution_id,
+                    workspace_id=workspace_id,
+                ).order_by(ApprovalRequest.requested_at.desc())
+            )
+        )
+
+    def get_approval_for_execution(
+        self,
+        approval_id: UUID,
+        *,
+        execution_id: UUID,
+        workspace_id: UUID,
+    ) -> ApprovalRequest | None:
+        """Return an approval only when its execution and workflow share the workspace."""
+        return self._session.scalar(
+            self._approval_statement(
+                execution_id=execution_id,
+                workspace_id=workspace_id,
+            ).where(ApprovalRequest.id == approval_id)
+        )
+
+    @staticmethod
+    def _approval_statement(*, execution_id: UUID, workspace_id: UUID):
+        return (
+            select(ApprovalRequest)
+            .join(
+                WorkflowExecution,
+                ApprovalRequest.execution_id == WorkflowExecution.id,
+            )
+            .join(
+                Workflow,
+                (Workflow.id == WorkflowExecution.workflow_id)
+                & (Workflow.workspace_id == WorkflowExecution.workspace_id),
+            )
+            .outerjoin(
+                ExecutionStep,
+                ApprovalRequest.execution_step_id == ExecutionStep.id,
+            )
+            .where(
+                ApprovalRequest.execution_id == execution_id,
+                WorkflowExecution.workspace_id == workspace_id,
+                Workflow.workspace_id == workspace_id,
+                or_(
+                    ApprovalRequest.execution_step_id.is_(None),
+                    ExecutionStep.execution_id == WorkflowExecution.id,
+                ),
             )
         )
 
@@ -418,14 +564,22 @@ class ExecutionRepository:
 
         executions_query = (
             select(WorkflowExecution)
-            .join(Workflow, WorkflowExecution.workflow_id == Workflow.id)
+            .join(
+                Workflow,
+                (WorkflowExecution.workflow_id == Workflow.id)
+                & (WorkflowExecution.workspace_id == Workflow.workspace_id),
+            )
             .where(*filters)
         )
         total = (
             self._session.scalar(
                 select(func.count())
                 .select_from(WorkflowExecution)
-                .join(Workflow, WorkflowExecution.workflow_id == Workflow.id)
+                .join(
+                    Workflow,
+                    (WorkflowExecution.workflow_id == Workflow.id)
+                    & (WorkflowExecution.workspace_id == Workflow.workspace_id),
+                )
                 .where(*filters)
             )
             or 0
@@ -455,6 +609,11 @@ class ExecutionRepository:
                 selectinload(WorkflowExecution.steps),
                 selectinload(WorkflowExecution.events),
             )
+            .join(
+                Workflow,
+                (WorkflowExecution.workflow_id == Workflow.id)
+                & (WorkflowExecution.workspace_id == Workflow.workspace_id),
+            )
             .where(
                 WorkflowExecution.id == execution_id,
                 WorkflowExecution.workspace_id == workspace_id,
@@ -466,6 +625,7 @@ class ExecutionRepository:
         events: list[WorkflowEvent],
         *,
         start_sequence: int = 1,
+        actor: str = "system",
     ) -> None:
         self._session.add_all(
             [
@@ -473,6 +633,7 @@ class ExecutionRepository:
                     execution_id=event.execution_id,
                     sequence_number=sequence,
                     event_type=event.event_type.value,
+                    actor=actor,
                     from_status=event.from_status,
                     to_status=event.to_status,
                     reason=event.reason,

@@ -7,11 +7,11 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from agentforge.api.auth import require_approval_operator
 from agentforge.api.dependencies import (
     WorkflowAccess,
     get_workflow_engine,
     get_workflow_orchestrator,
+    require_approval_access,
     require_workflow_access,
 )
 from agentforge.api.responses import execution_response
@@ -22,6 +22,7 @@ from agentforge.api.schemas import (
     PageLimit,
 )
 from agentforge.api.services.executions import (
+    ApprovalDecisionConflictError,
     ExecutionPersistenceError,
     ExecutionRepository,
 )
@@ -63,6 +64,9 @@ def create_execution(
                 workflow_id=workflow.id,
                 workflow_version=workflow.version,
                 definition=workflow.workflow_definition,
+                workspace_id=access.workspace_id,
+                created_by_user_id=access.user_id,
+                actor_user_id=access.user_id,
             ),
         )
     except WorkflowValidationError as exc:
@@ -95,9 +99,19 @@ def start_execution(
         repository.get_execution(execution_id, workspace_id=access.workspace_id)
     except ExecutionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Execution not found.") from exc
-    orchestrator.engine._approval_repository = repository
     try:
-        execution = orchestrator.start(execution_id, on_update=repository.synchronize_execution)
+        with orchestrator.engine.use_approval_repository(
+            repository,
+            workspace_id=access.workspace_id,
+        ):
+            execution = orchestrator.start(
+                execution_id,
+                on_update=lambda snapshot: repository.synchronize_execution(
+                    snapshot,
+                    workspace_id=access.workspace_id,
+                    actor_user_id=access.user_id,
+                ),
+            )
     except ExecutionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Execution not found.") from exc
     except InvalidExecutionStateError as exc:
@@ -115,12 +129,12 @@ def start_execution(
 def list_execution_approvals(
     execution_id: UUID,
     session: Annotated[Session, Depends(get_db_session)],
-    _operator: Annotated[None, Depends(require_approval_operator)],
+    access: Annotated[WorkflowAccess, Depends(require_workflow_access)],
 ) -> list[ExecutionApprovalResponse]:
     """List approval status and safe action descriptions for one execution."""
     repository = ExecutionRepository(session)
     try:
-        repository.get_execution(execution_id)
+        repository.get_execution(execution_id, workspace_id=access.workspace_id)
     except ExecutionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Execution not found.") from exc
     return [
@@ -135,7 +149,10 @@ def list_execution_approvals(
             expires_at=row.expires_at,
             reviewed_at=row.reviewed_at,
         )
-        for row in repository.get_approval_requests(execution_id=execution_id)
+        for row in repository.get_approval_requests(
+            execution_id=execution_id,
+            workspace_id=access.workspace_id,
+        )
     ]
 
 
@@ -145,30 +162,47 @@ def _review_approval(
     approved: bool,
     session: Session,
     engine: WorkflowEngine,
+    access: WorkflowAccess,
 ) -> ExecutionResponse:
     repository = ExecutionRepository(session)
-    approval = repository.get_approval_request_by_id(approval_id)
+    try:
+        repository.get_execution(execution_id, workspace_id=access.workspace_id)
+    except ExecutionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Execution not found.") from exc
+    approval = repository.get_approval_for_execution(
+        approval_id,
+        execution_id=execution_id,
+        workspace_id=access.workspace_id,
+    )
     if approval is None:
-        raise HTTPException(status_code=404, detail="Approval not found.")
-    if approval.execution_id != execution_id:
         raise HTTPException(status_code=404, detail="Approval not found.")
     if approval.status != "pending":
         raise HTTPException(status_code=409, detail="Approval is no longer pending.")
     if approval.expires_at <= datetime.now(UTC):
-        repository.expire_approval_request(approval_id)
-        raise HTTPException(status_code=409, detail="Approval has expired.")
-    engine._approval_repository = repository
-    try:
-        result = engine.approve(
-            execution_id,
-            approved=approved,
-            task_id=approval.execution_step.task_id if approval.execution_step else None,
-            on_update=repository.synchronize_execution,
+        repository.expire_approval_request(
+            approval_id,
+            execution_id=execution_id,
+            workspace_id=access.workspace_id,
         )
+        raise HTTPException(status_code=409, detail="Approval has expired.")
+    try:
+        with engine.use_approval_repository(repository, workspace_id=access.workspace_id):
+            result = engine.approve(
+                execution_id,
+                approved=approved,
+                task_id=approval.execution_step.task_id if approval.execution_step else None,
+                on_update=lambda snapshot: repository.synchronize_execution(
+                    snapshot,
+                    workspace_id=access.workspace_id,
+                    actor_user_id=access.user_id,
+                ),
+            )
     except ExecutionNotFoundError as exc:
         raise HTTPException(status_code=409, detail="Execution cannot resume.") from exc
     except InvalidExecutionStateError as exc:
         raise HTTPException(status_code=409, detail="Approval cannot be applied now.") from exc
+    except ApprovalDecisionConflictError as exc:
+        raise HTTPException(status_code=409, detail="Approval is no longer pending.") from exc
     except ExecutionPersistenceError as exc:
         raise HTTPException(status_code=503, detail="Approval could not be persisted.") from exc
     return execution_response(result)
@@ -182,10 +216,10 @@ def approve_execution_approval(
     approval_id: UUID,
     session: Annotated[Session, Depends(get_db_session)],
     engine: Annotated[WorkflowEngine, Depends(get_workflow_engine)],
-    _operator: Annotated[None, Depends(require_approval_operator)],
+    access: Annotated[WorkflowAccess, Depends(require_approval_access)],
 ) -> ExecutionResponse:
     """Approve a persisted pending action and resume its execution."""
-    return _review_approval(execution_id, approval_id, True, session, engine)
+    return _review_approval(execution_id, approval_id, True, session, engine, access)
 
 
 @router.post(
@@ -196,10 +230,10 @@ def reject_execution_approval(
     approval_id: UUID,
     session: Annotated[Session, Depends(get_db_session)],
     engine: Annotated[WorkflowEngine, Depends(get_workflow_engine)],
-    _operator: Annotated[None, Depends(require_approval_operator)],
+    access: Annotated[WorkflowAccess, Depends(require_approval_access)],
 ) -> ExecutionResponse:
     """Reject a persisted pending action and fail the waiting task safely."""
-    return _review_approval(execution_id, approval_id, False, session, engine)
+    return _review_approval(execution_id, approval_id, False, session, engine, access)
 
 
 @router.get("/executions", response_model=ExecutionListResponse)
@@ -257,12 +291,19 @@ def cancel_execution(
         repository.get_execution(execution_id, workspace_id=access.workspace_id)
     except ExecutionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Execution not found.") from exc
-    orchestrator.engine._approval_repository = repository
     try:
-        snapshot = orchestrator.cancel(
-            execution_id,
-            on_update=repository.synchronize_execution,
-        )
+        with orchestrator.engine.use_approval_repository(
+            repository,
+            workspace_id=access.workspace_id,
+        ):
+            snapshot = orchestrator.cancel(
+                execution_id,
+                on_update=lambda value: repository.synchronize_execution(
+                    value,
+                    workspace_id=access.workspace_id,
+                    actor_user_id=access.user_id,
+                ),
+            )
     except ExecutionNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Execution not found.") from exc
     except InvalidExecutionStateError as exc:

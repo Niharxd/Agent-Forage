@@ -1,6 +1,12 @@
 import { apiBaseUrl } from "./config";
 
-export type ExecutionStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+export type ExecutionStatus =
+  | "pending"
+  | "running"
+  | "waiting_approval"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export type ExecutionTaskResult = {
   task_id: string;
@@ -21,7 +27,14 @@ export type ExecutionPlanTask = {
   task_id: string;
   agent_type: string;
   dependency_ids: string[];
-  status: "pending" | "running" | "completed" | "failed" | "blocked" | "skipped";
+  status:
+    | "pending"
+    | "running"
+    | "waiting_approval"
+    | "completed"
+    | "failed"
+    | "blocked"
+    | "skipped";
 };
 
 export type ExecutionEvent = {

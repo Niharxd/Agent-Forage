@@ -146,6 +146,60 @@ describe("ExecutionsPage", () => {
     });
   });
 
+  it("shows waiting approvals in history and keeps cancellation available", async () => {
+    const waitingExecution = {
+      ...executionRecord(),
+      status: "waiting_approval",
+      completed_at: null,
+      events: [
+        {
+          event_type: "workflow_waiting_for_approval",
+          execution_id: executionId,
+          task_id: null,
+          timestamp: "2026-11-10T09:00:06Z",
+          from_status: "running",
+          to_status: "waiting_approval",
+          reason: null,
+          metadata: {},
+        },
+      ],
+      workflow_plan: [{ ...executionRecord().workflow_plan[0], status: "waiting_approval" }],
+    };
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input);
+      if (url.includes("/executions?")) {
+        return Promise.resolve(jsonResponse(executionList([waitingExecution])));
+      }
+      if (url.endsWith(`/executions/${executionId}/approvals`)) {
+        return Promise.resolve(jsonResponse([]));
+      }
+      if (url.endsWith(`/executions/${executionId}/cancel`) && init?.method === "POST") {
+        return Promise.resolve(jsonResponse(waitingExecution));
+      }
+      if (url.endsWith(`/executions/${executionId}`)) {
+        return Promise.resolve(jsonResponse(waitingExecution));
+      }
+      return Promise.resolve(jsonResponse(executionList([waitingExecution])));
+    });
+
+    render(<ExecutionsPage />);
+    expect(await screen.findAllByText("Awaiting approval")).not.toHaveLength(0);
+    fireEvent.click(await screen.findByRole("button", { name: `View execution ${executionId}` }));
+    expect(await screen.findByRole("button", { name: "Cancel execution" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel execution" }));
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(
+          ([url, init]) =>
+            String(url).endsWith(`/executions/${executionId}/cancel`) &&
+            init?.method === "POST",
+        ),
+      ).toBe(true);
+    });
+  });
+
   it("ignores a stale list response after a newer search response", async () => {
     const fetchMock = vi.mocked(fetch);
     const olderResponse = deferred<Response>();

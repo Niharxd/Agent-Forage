@@ -41,6 +41,7 @@ function statusColor(status: ExecutionPlanTask["status"]): string {
     case "failed":
       return "var(--error)";
     case "running":
+    case "waiting_approval":
       return "var(--accent)";
     case "pending":
     case "blocked":

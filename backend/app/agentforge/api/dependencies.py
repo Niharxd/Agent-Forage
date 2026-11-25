@@ -16,6 +16,7 @@ from agentforge.workflow.engine import WorkflowEngine
 from agentforge.workflow.orchestrator import WorkflowOrchestrator
 
 VALID_WORKSPACE_ROLES = {"owner", "admin", "member"}
+APPROVAL_WORKSPACE_ROLES = {"owner", "admin"}
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,18 @@ def require_workflow_access(
         user_id=user.id,
         role=membership.role,
     )
+
+
+def require_approval_access(
+    access: WorkflowAccess = Depends(require_workflow_access),
+) -> WorkflowAccess:
+    """Require an operator or a privileged workspace role to decide approvals."""
+    if not access.operator and access.role not in APPROVAL_WORKSPACE_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Owner or admin access is required to decide approvals.",
+        )
+    return access
 
 
 def get_workflow_engine(request: Request) -> WorkflowEngine:

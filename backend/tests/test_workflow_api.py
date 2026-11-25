@@ -39,7 +39,7 @@ def api(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, WorkflowEngine, Fa
             stored_executions[snapshot.execution_id] = snapshot.model_copy(deep=True)
             execution_definitions[snapshot.execution_id] = definition
 
-        def synchronize_execution(self, snapshot) -> None:
+        def synchronize_execution(self, snapshot, **_kwargs) -> None:
             stored_executions[snapshot.execution_id] = snapshot.model_copy(deep=True)
 
         def get_execution(self, execution_id: UUID, **_kwargs) -> WorkflowExecutionSnapshot:

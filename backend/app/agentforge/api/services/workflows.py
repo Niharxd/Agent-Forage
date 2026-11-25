@@ -87,6 +87,9 @@ def create_planned_workflow_execution(
         workflow_version=record.version,
         definition=definition,
         original_task=original_task,
+        workspace_id=workspace_id,
+        created_by_user_id=user_id,
+        actor_user_id=user_id,
     )
     return saved_workflow
 

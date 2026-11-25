@@ -1,0 +1,617 @@
+﻿===== USER MODEL =====
+"""User identity persistence model."""
+
+from datetime import datetime
+from typing import TYPE_CHECKING
+from uuid import UUID, uuid4
+
+from sqlalchemy import CheckConstraint, DateTime, String, Uuid, text
+from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
+
+if TYPE_CHECKING:
+    from agentforge.domain.models.workspace import Workspace, WorkspaceMembership
+
+from agentforge.database.base import Base
+from agentforge.domain.models.mixins import TimestampMixin
+
+
+class User(TimestampMixin, Base):
+    """A platform user, with authentication fields kept separate from operator secrets."""
+
+    __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint(
+            "account_status IN ('pending', 'active', 'suspended', 'deleted')",
+            name="ck_users_account_status",
+        ),
+        CheckConstraint("email = lower(btrim(email))", name="ck_users_normalized_email"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    email: Mapped[str] = mapped_column(String(320), nullable=False, unique=True, index=True)
+    password_hash: Mapped[str | None] = mapped_column(String(255))
+    account_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="pending",
+        server_default=text("'pending'"),
+    )
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    owned_workspaces: Mapped[list["Workspace"]] = relationship(
+        back_populates="owner",
+        foreign_keys="Workspace.owner_id",
+    )
+    workspace_memberships: Mapped[list["WorkspaceMembership"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    @validates("email")
+    def normalize_email(self, _key: str, value: str) -> str:
+        return value.strip().lower()
+===== WORKFLOW MODEL =====
+"""Versioned workflow persistence model."""
+
+from typing import TYPE_CHECKING, Any
+from uuid import UUID, uuid4
+
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from agentforge.database.base import Base
+from agentforge.domain.models.mixins import TimestampMixin
+
+if TYPE_CHECKING:
+    from agentforge.domain.models.execution import WorkflowExecution
+    from agentforge.domain.models.user import User
+    from agentforge.domain.models.workspace import Workspace
+
+
+class Workflow(TimestampMixin, Base):
+    """A named, validated workflow definition."""
+
+    __tablename__ = "workflows"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "name",
+            "version",
+            name="uq_workflows_workspace_name_version",
+        ),
+        UniqueConstraint("workspace_id", "id", name="uq_workflows_workspace_id"),
+        CheckConstraint("version > 0", name="ck_workflows_positive_version"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    workflow_definition: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    workspace_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+    )
+    updated_by_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+    )
+
+    workspace: Mapped["Workspace"] = relationship(back_populates="workflows")
+    created_by: Mapped["User | None"] = relationship(
+        foreign_keys=[created_by_user_id],
+    )
+    updated_by: Mapped["User | None"] = relationship(
+        foreign_keys=[updated_by_user_id],
+    )
+    executions: Mapped[list["WorkflowExecution"]] = relationship(
+        back_populates="workflow",
+        foreign_keys="WorkflowExecution.workflow_id",
+        passive_deletes="all",
+        overlaps="workspace",
+    )
+===== EXECUTION MODEL =====
+"""Workflow execution, attempt, approval, tool, and audit models."""
+
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
+from uuid import UUID, uuid4
+
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    SmallInteger,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    func,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from agentforge.database.base import Base
+
+if TYPE_CHECKING:
+    from agentforge.domain.models.user import User
+    from agentforge.domain.models.workflow import Workflow
+    from agentforge.domain.models.workspace import Workspace
+
+
+class WorkflowExecution(Base):
+    """A durable execution, including the state captured before planning."""
+
+    __tablename__ = "workflow_executions"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["workspace_id", "workflow_id"],
+            ["workflows.workspace_id", "workflows.id"],
+            ondelete="RESTRICT",
+            name="fk_workflow_executions_workspace_workflow",
+        ),
+        CheckConstraint(
+            "status IN ('submitted', 'planning', 'planned', 'queued', 'running', "
+            "'waiting_approval', 'succeeded', 'failed', 'cancelled', 'pending', 'completed')",
+            name="ck_workflow_executions_status",
+        ),
+        CheckConstraint(
+            "plan_version IS NULL OR plan_version > 0",
+            name="ck_execution_plan_version",
+        ),
+        CheckConstraint(
+            "status NOT IN ('succeeded', 'failed', 'cancelled', 'completed') "
+            "OR completed_at IS NOT NULL",
+            name="ck_terminal_execution_has_completion_time",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    workflow_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workflows.id", ondelete="RESTRICT"),
+        index=True,
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    created_by_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+    )
+    started_by_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+    )
+    cancelled_by_user_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        index=True,
+    )
+    original_task: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="submitted")
+    plan_version: Mapped[int | None] = mapped_column(Integer)
+    provider_mode: Mapped[str | None] = mapped_column(String(50))
+    terminal_reason: Mapped[str | None] = mapped_column(Text)
+    report: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    workspace: Mapped["Workspace"] = relationship(
+        back_populates="executions",
+        foreign_keys=[workspace_id],
+    )
+    created_by: Mapped["User | None"] = relationship(
+        foreign_keys=[created_by_user_id],
+    )
+    started_by: Mapped["User | None"] = relationship(
+        foreign_keys=[started_by_user_id],
+    )
+    cancelled_by: Mapped["User | None"] = relationship(
+        foreign_keys=[cancelled_by_user_id],
+    )
+    workflow: Mapped["Workflow | None"] = relationship(
+        back_populates="executions",
+        foreign_keys=[workflow_id],
+    )
+    steps: Mapped[list["ExecutionStep"]] = relationship(
+        back_populates="execution",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    approval_requests: Mapped[list["ApprovalRequest"]] = relationship(
+        back_populates="execution",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    tool_execution_records: Mapped[list["ToolExecutionRecord"]] = relationship(
+        back_populates="execution",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    events: Mapped[list["ExecutionEvent"]] = relationship(
+        back_populates="execution",
+        passive_deletes="all",
+        order_by="ExecutionEvent.sequence_number",
+    )
+
+
+class ExecutionStep(Base):
+    """A persisted attempt for a stable task in a workflow execution."""
+
+    __tablename__ = "execution_steps"
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_id",
+            "task_id",
+            "attempt_number",
+            name="uq_execution_steps_task_attempt",
+        ),
+        CheckConstraint("attempt_number > 0", name="ck_execution_steps_positive_attempt"),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'waiting_approval', 'succeeded', "
+            "'failed', 'cancelled', 'completed', 'blocked', 'skipped')",
+            name="ck_execution_steps_status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    execution_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workflow_executions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    task_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    attempt_number: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1)
+    agent_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")
+    input_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    output_data: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    execution: Mapped[WorkflowExecution] = relationship(back_populates="steps")
+    approval_requests: Mapped[list["ApprovalRequest"]] = relationship(
+        back_populates="execution_step",
+        passive_deletes="all",
+    )
+    tool_execution_records: Mapped[list["ToolExecutionRecord"]] = relationship(
+        back_populates="execution_step",
+        passive_deletes="all",
+    )
+
+
+class ApprovalRequest(Base):
+    """An approval gate bound to a specific safe action representation."""
+
+    __tablename__ = "approval_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected', 'expired')",
+            name="ck_approval_requests_status",
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND reviewed_at IS NULL) OR "
+            "(status <> 'pending' AND reviewed_at IS NOT NULL)",
+            name="ck_approval_review_timestamp",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    execution_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workflow_executions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_step_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("execution_steps.id", ondelete="SET NULL"),
+        index=True,
+    )
+    tool_id: Mapped[str | None] = mapped_column(String(100))
+    action_description: Mapped[str] = mapped_column(Text, nullable=False)
+    action_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    safe_arguments: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC) + timedelta(hours=24),
+        server_default=text("now() + interval '24 hours'"),
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    execution: Mapped[WorkflowExecution] = relationship(back_populates="approval_requests")
+    execution_step: Mapped[ExecutionStep | None] = relationship(back_populates="approval_requests")
+
+
+class ToolExecutionRecord(Base):
+    """A durable record of a registered tool invocation."""
+
+    __tablename__ = "tool_execution_records"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('requested', 'awaiting_approval', 'running', 'succeeded', "
+            "'failed', 'denied', 'ambiguous')",
+            name="ck_tool_execution_records_status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    execution_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workflow_executions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    execution_step_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("execution_steps.id", ondelete="SET NULL"),
+        index=True,
+    )
+    tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="requested")
+    input_summary: Mapped[str | None] = mapped_column(Text)
+    output_summary: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    execution: Mapped[WorkflowExecution] = relationship(back_populates="tool_execution_records")
+    execution_step: Mapped[ExecutionStep | None] = relationship(
+        back_populates="tool_execution_records"
+    )
+
+
+class ExecutionEvent(Base):
+    """Append-only lifecycle and audit event for an execution."""
+
+    __tablename__ = "execution_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_id",
+            "sequence_number",
+            name="uq_execution_events_sequence",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+        server_default=text("gen_random_uuid()"),
+    )
+    execution_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        ForeignKey("workflow_executions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    sequence_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    event_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    from_status: Mapped[str | None] = mapped_column(String(30))
+    to_status: Mapped[str | None] = mapped_column(String(30))
+    actor: Mapped[str] = mapped_column(String(100), nullable=False, default="system")
+    reason: Mapped[str | None] = mapped_column(Text)
+    details: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=text("'{}'::jsonb"),
+    )
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    execution: Mapped[WorkflowExecution] = relationship(back_populates="events")
+===== SERVICE DIFF =====
+diff --git a/backend/app/agentforge/api/services/executions.py b/backend/app/agentforge/api/services/executions.py
+index 92ff98e..02a9eed 100644
+--- a/backend/app/agentforge/api/services/executions.py
++++ b/backend/app/agentforge/api/services/executions.py
+@@ -12,6 +12,7 @@ from agentforge.domain.models import (
+     ExecutionEvent,
+     ExecutionStep,
+     WorkflowExecution,
++    Workspace,
+ )
+ from agentforge.domain.models.workflow import Workflow
+ from agentforge.domain.workflows.models import (
+@@ -93,6 +94,8 @@ class ExecutionRepository:
+             record = WorkflowExecution(
+                 id=snapshot.execution_id,
+                 workflow_id=workflow_id,
++                workspace_id=workflow.workspace_id,
++                created_by_user_id=workflow.created_by_user_id,
+                 original_task=(
+                     original_task
+                     if original_task is not None
+@@ -371,7 +374,13 @@ class ExecutionRepository:
+         search: str | None = None,
+     ) -> tuple[list[WorkflowExecutionSnapshot], int]:
+         """Return filtered persisted executions in newest-first paginated order."""
++        legacy_workspace = self._session.scalar(
++            select(Workspace).where(Workspace.slug == "legacy-operator")
++        )
++        if legacy_workspace is None:
++            return [], 0
+         filters = [WorkflowExecution.status.in_(_API_WORKFLOW_STATUSES)]
++        filters.append(WorkflowExecution.workspace_id == legacy_workspace.id)
+         if status is not None:
+             filters.append(WorkflowExecution.status == status.value)
+         if search and search.strip():
+@@ -413,6 +422,11 @@ class ExecutionRepository:
+         return [self._snapshot(record) for record in records], total
+ 
+     def _load_execution(self, execution_id: UUID) -> WorkflowExecution | None:
++        legacy_workspace = self._session.scalar(
++            select(Workspace).where(Workspace.slug == "legacy-operator")
++        )
++        if legacy_workspace is None:
++            return None
+         return self._session.scalar(
+             select(WorkflowExecution)
+             .options(
+@@ -420,7 +434,10 @@ class ExecutionRepository:
+                 selectinload(WorkflowExecution.steps),
+                 selectinload(WorkflowExecution.events),
+             )
+-            .where(WorkflowExecution.id == execution_id)
++            .where(
++                WorkflowExecution.id == execution_id,
++                WorkflowExecution.workspace_id == legacy_workspace.id,
++            )
+         )
+ 
+     def _insert_events(
+diff --git a/backend/app/agentforge/api/services/workflows.py b/backend/app/agentforge/api/services/workflows.py
+index 785e868..7bd8687 100644
+--- a/backend/app/agentforge/api/services/workflows.py
++++ b/backend/app/agentforge/api/services/workflows.py
+@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
+ 
+ from agentforge.api.schemas import WorkflowCreateRequest, WorkflowResponse
+ from agentforge.api.services.executions import ExecutionRepository
+-from agentforge.domain.models import Workflow
++from agentforge.domain.models import Workflow, Workspace
+ from agentforge.domain.workflows.models import WorkflowDefinition, WorkflowExecutionSnapshot
+ 
+ 
+@@ -65,20 +65,37 @@ def create_planned_workflow_execution(
+ 
+ 
+ def _new_workflow_record(session: Session, definition: WorkflowDefinition) -> Workflow:
++    legacy_workspace = session.scalar(select(Workspace).where(Workspace.slug == "legacy-operator"))
++    if legacy_workspace is None:
++        raise RuntimeError("The legacy operator workspace is not initialized.")
+     latest_version = session.scalar(
+-        select(func.max(Workflow.version)).where(Workflow.name == definition.name)
++        select(func.max(Workflow.version)).where(
++            Workflow.workspace_id == legacy_workspace.id,
++            Workflow.name == definition.name,
++        )
+     )
+     return Workflow(
+         name=definition.name,
+         description=definition.description,
+         version=(latest_version or 0) + 1,
+         workflow_definition=definition.model_dump(mode="json"),
++        workspace_id=legacy_workspace.id,
++        created_by_user_id=legacy_workspace.owner_id,
++        updated_by_user_id=legacy_workspace.owner_id,
+     )
+ 
+ 
+ def get_workflow(session: Session, workflow_id: UUID) -> WorkflowResponse | None:
+     """Return a workflow response without exposing the SQLAlchemy object."""
+-    record = session.get(Workflow, workflow_id)
++    legacy_workspace = session.scalar(select(Workspace).where(Workspace.slug == "legacy-operator"))
++    if legacy_workspace is None:
++        return None
++    record = session.scalar(
++        select(Workflow).where(
++            Workflow.id == workflow_id,
++            Workflow.workspace_id == legacy_workspace.id,
++        )
++    )
+     return workflow_response(record) if record is not None else None
+ 
+ 
+@@ -89,12 +106,13 @@ def list_workflows(
+     offset: int,
+ ) -> tuple[list[WorkflowResponse], int]:
+     """Return workflows ordered by name and descending version."""
+-    total = session.scalar(select(func.count()).select_from(Workflow)) or 0
++    legacy_workspace = session.scalar(select(Workspace).where(Workspace.slug == "legacy-operator"))
++    if legacy_workspace is None:
++        return [], 0
++    scoped = select(Workflow).where(Workflow.workspace_id == legacy_workspace.id)
++    total = session.scalar(select(func.count()).select_from(scoped.subquery())) or 0
+     records = session.scalars(
+-        select(Workflow)
+-        .order_by(Workflow.name.asc(), Workflow.version.desc())
+-        .offset(offset)
+-        .limit(limit)
++        scoped.order_by(Workflow.name.asc(), Workflow.version.desc()).offset(offset).limit(limit)
+     ).all()
+     return [workflow_response(record) for record in records], total
+ 
