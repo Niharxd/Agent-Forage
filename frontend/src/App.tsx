@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
-import { login, loginUser, logout, restoreSession } from "./api/auth";
+import { clearAuthMode, login, loginUser, logout, restoreSession, type AuthIdentity } from "./api/auth";
 import { AppShell } from "./components/AppShell";
 import AgentsPage from "./pages/AgentsPage";
 import DashboardPage from "./pages/DashboardPage";
@@ -10,9 +10,10 @@ import SettingsPage from "./pages/SettingsPage";
 import ToolsPage from "./pages/ToolsPage";
 import WorkflowsPage from "./pages/WorkflowsPage";
 import { ThemeProvider } from "./theme/ThemeContext";
+import UserDashboardPage from "./pages/UserDashboardPage";
 
 export default function App() {
-  const [authenticated, setAuthenticated] = useState(false);
+  const [identity, setIdentity] = useState<AuthIdentity | null>(null);
   const [checking, setChecking] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -22,13 +23,16 @@ export default function App() {
   const credentialRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     let active = true;
-    restoreSession().then((value) => { if (active) setAuthenticated(value); })
+    restoreSession().then((value) => { if (active) setIdentity(value); })
       .catch(() => { if (active) setError("Sign in to continue."); })
       .finally(() => { if (active) setChecking(false); });
     return () => { active = false; };
   }, []);
   useEffect(() => {
-    const expired = () => setAuthenticated(false);
+    const expired = () => {
+      clearAuthMode();
+      setIdentity(null);
+    };
     window.addEventListener("agentforge:session-expired", expired);
     return () => window.removeEventListener("agentforge:session-expired", expired);
   }, []);
@@ -48,7 +52,7 @@ export default function App() {
         await loginUser(email, password);
         if (passwordRef.current) passwordRef.current.value = "";
       }
-      setAuthenticated(true);
+      setIdentity(await restoreSession());
     } catch (reason) {
       if (credentialRef.current) credentialRef.current.value = "";
       if (passwordRef.current) passwordRef.current.value = "";
@@ -58,13 +62,13 @@ export default function App() {
 
   async function signOut() {
     setBusy(true); setError(null);
-    try { await logout(); setAuthenticated(false); }
+    try { await logout(); setIdentity(null); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "Sign out failed."); }
     finally { setBusy(false); }
   }
 
   if (checking) return <div className="grid min-h-screen place-items-center bg-[var(--bg)] text-[var(--secondary)]" role="status">Checking session…</div>;
-  if (!authenticated) return <main className="grid min-h-screen place-items-center bg-[var(--bg)] px-4 text-[var(--text)]"><form onSubmit={(event) => void submit(event)} className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-8 shadow-2xl">
+  if (!identity) return <main className="grid min-h-screen place-items-center bg-[var(--bg)] px-4 text-[var(--text)]"><form onSubmit={(event) => void submit(event)} className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-8 shadow-2xl">
     <div className="mb-7 flex items-center gap-4"><img src="/assets/agentforge-logo.png" alt="AgentForge" className="h-14 w-14 rounded-xl"/><div><h1 className="text-xl font-semibold">{loginMode === "operator" ? "Operator sign in" : "User sign in"}</h1><p className="text-sm text-[var(--secondary)]">Authenticate to open AgentForge.</p></div></div>
     <div className="mb-5 grid grid-cols-2 rounded-lg border border-[var(--border)] p-1">
       <button type="button" onClick={() => setLoginMode("operator")} className={`rounded-md px-3 py-2 text-sm ${loginMode === "operator" ? "bg-[var(--surface-alt)] font-medium" : "text-[var(--secondary)]"}`}>Operator</button>
@@ -86,12 +90,12 @@ export default function App() {
     <ThemeProvider>
       <BrowserRouter>
         <Routes>
-          <Route element={<AppShell onLogout={() => void signOut()} logoutError={error} />}>
-            <Route path="/" element={<DashboardPage />} />
+          <Route element={<AppShell identity={identity} onLogout={() => void signOut()} logoutError={error} />}>
+            <Route path="/" element={identity.kind === "user" ? <UserDashboardPage /> : <DashboardPage />} />
             <Route path="/workflows" element={<WorkflowsPage />} />
-            <Route path="/agents" element={<AgentsPage />} />
-            <Route path="/tools" element={<ToolsPage />} />
-            <Route path="/executions" element={<ExecutionsPage />} />
+            <Route path="/agents" element={identity.kind === "operator" ? <AgentsPage /> : <Navigate to="/" replace />} />
+            <Route path="/tools" element={identity.kind === "operator" ? <ToolsPage /> : <Navigate to="/" replace />} />
+            <Route path="/executions" element={<ExecutionsPage canDecideApprovals={identity.kind === "operator" || identity.workspaceRole === "owner" || identity.workspaceRole === "admin"} />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>

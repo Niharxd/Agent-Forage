@@ -7,6 +7,7 @@ afterEach(() => {
 
 describe("session authentication API", () => {
   it("checks, creates, and revokes the session through the shared relative URL", async () => {
+    window.localStorage.clear();
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => ({
       ok: true,
       status: 200,

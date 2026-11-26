@@ -10,9 +10,10 @@ const items = [
   { to: "/settings", label: "Settings", icon: Settings2 },
 ];
 
-type SidebarProps = { collapsed: boolean; onToggleCollapse: () => void; mobileOpen: boolean; onToggleMobile: () => void };
+type SidebarProps = { collapsed: boolean; onToggleCollapse: () => void; mobileOpen: boolean; onToggleMobile: () => void; isOperator: boolean };
 
-export function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onToggleMobile }: SidebarProps) {
+export function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onToggleMobile, isOperator }: SidebarProps) {
+  const visibleItems = isOperator ? items : items.filter(({ to }) => to !== "/agents" && to !== "/tools");
   return <>
     <aside className={`fixed inset-y-0 left-0 z-40 flex w-[260px] flex-col border-r border-[var(--border)] bg-[var(--sidebar)] px-3 py-5 transition-all md:static md:translate-x-0 ${mobileOpen ? "translate-x-0" : "-translate-x-full"} ${collapsed ? "md:w-[78px]" : "md:w-[248px]"}`} aria-label="Sidebar navigation">
       <div className={`mb-7 flex items-center justify-between px-2 ${collapsed ? "h-11" : "h-[74px]"}`}>
@@ -24,10 +25,10 @@ export function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onToggleMobil
       </div>
       <div className="mb-3 px-3 text-[10px] font-semibold uppercase tracking-[.16em] text-[var(--muted)]">Workspace</div>
       <nav aria-label="Primary navigation" className="space-y-1">
-        {items.map(({ to, label, icon: Icon }) => <NavLink key={to} to={to} end={to === "/"} onClick={onToggleMobile} title={collapsed ? label : undefined} className={({ isActive }) => `group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-colors ${isActive ? "bg-gradient-to-r from-blue-500/15 to-violet-500/10 text-white before:absolute before:inset-y-2 before:left-0 before:w-[2px] before:rounded-full before:bg-gradient-to-b before:from-blue-400 before:to-violet-500" : "text-[var(--secondary)] hover:bg-white/[.045] hover:text-[var(--text)]"} ${collapsed ? "md:justify-center md:px-0" : ""}`}><Icon size={17} strokeWidth={1.8} />{!collapsed && <span>{label}</span>}</NavLink>)}
+        {visibleItems.map(({ to, label, icon: Icon }) => <NavLink key={to} to={to} end={to === "/"} onClick={onToggleMobile} title={collapsed ? label : undefined} className={({ isActive }) => `group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-colors ${isActive ? "bg-gradient-to-r from-blue-500/15 to-violet-500/10 text-[var(--text)] before:absolute before:inset-y-2 before:left-0 before:w-[2px] before:rounded-full before:bg-gradient-to-b before:from-blue-400 before:to-violet-500" : "text-[var(--secondary)] hover:bg-[var(--surface-alt)] hover:text-[var(--text)]"} ${collapsed ? "md:justify-center md:px-0" : ""}`}><Icon size={17} strokeWidth={1.8} />{!collapsed && <span>{label}</span>}</NavLink>)}
       </nav>
       <div className="mt-auto">
-        <div className={`mb-3 rounded-lg border border-[var(--border)] bg-white/[.025] p-3 ${collapsed ? "md:hidden" : ""}`}><div className="text-xs font-medium">Operator workspace</div><p className="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">Workflows, agents, tools, and execution history.</p></div>
+        <div className={`mb-3 rounded-lg border border-[var(--border)] bg-[var(--surface-alt)] p-3 ${collapsed ? "md:hidden" : ""}`}><div className="text-xs font-medium">{isOperator ? "Operator workspace" : "Personal workspace"}</div><p className="mt-2 text-[11px] leading-relaxed text-[var(--muted)]">{isOperator ? "Workflows, agents, tools, and execution history." : "Your workflows and execution history."}</p></div>
         <button type="button" onClick={onToggleCollapse} aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"} className="hidden w-full items-center justify-center rounded-lg border border-[var(--border)] py-2 text-[var(--muted)] hover:bg-white/[.04] md:flex">{collapsed ? <ChevronRight size={16}/> : <><ChevronLeft size={16}/><span className="ml-2 text-xs">Collapse sidebar</span></>}</button>
       </div>
     </aside>

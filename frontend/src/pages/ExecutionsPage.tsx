@@ -67,7 +67,11 @@ function formatTimestamp(value: string | null): string {
   return Number.isNaN(date.valueOf()) ? "Unavailable" : date.toLocaleString();
 }
 
-function ExecutionDetails({ execution, onChanged }: { execution: Execution; onChanged: () => void }) {
+function ExecutionDetails({ execution, onChanged, canDecideApprovals }: {
+  execution: Execution;
+  onChanged: () => void;
+  canDecideApprovals: boolean;
+}) {
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -125,7 +129,8 @@ function ExecutionDetails({ execution, onChanged }: { execution: Execution; onCh
 
       <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-alt)] p-4">
         <div className="mb-3 flex items-center gap-2"><AlertTriangle size={15} className="text-amber-300"/><h3 className="text-sm font-semibold">Approvals</h3><span className="ml-auto rounded-full border border-[var(--border)] px-2 py-0.5 text-[10px] text-[var(--muted)]">{approvals.filter((item) => item.status === "pending").length} pending</span></div>
-        {approvals.map((approval) => <div key={approval.approval_id} className="border-t border-[var(--border)] py-3 first:border-0"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm text-[var(--text)]">{approval.action_description}</p><StatusBadge tone={approval.status === "pending" ? "blue" : approval.status === "approved" ? "green" : "neutral"}>{approval.status}</StatusBadge></div><p className="mt-1 break-all text-[10px] text-[var(--muted)]">Approval {approval.approval_id} · Execution {approval.execution_id} · Tool {approval.tool_id ?? "unavailable"}</p><p className="mt-1 text-xs text-[var(--secondary)]">Task {approval.task_id ?? "unassigned"} · Requested {formatTimestamp(approval.requested_at)}{approval.reviewed_at ? ` · Reviewed ${formatTimestamp(approval.reviewed_at)}` : ""}</p>{approval.status === "pending" && <div className="mt-3 flex gap-2"><Button onClick={() => void decide(approval, "approve")} disabled={acting}>{acting ? "Saving…" : "Approve"}</Button><Button variant="secondary" onClick={() => void decide(approval, "reject")} disabled={acting}>{acting ? "Saving…" : "Reject"}</Button></div>}</div>)}
+        {approvals.map((approval) => <div key={approval.approval_id} className="border-t border-[var(--border)] py-3 first:border-0"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-sm text-[var(--text)]">{approval.action_description}</p><StatusBadge tone={approval.status === "pending" ? "blue" : approval.status === "approved" ? "green" : "neutral"}>{approval.status}</StatusBadge></div><p className="mt-1 break-all text-[10px] text-[var(--muted)]">Approval {approval.approval_id} · Execution {approval.execution_id} · Tool {approval.tool_id ?? "unavailable"}</p><p className="mt-1 text-xs text-[var(--secondary)]">Task {approval.task_id ?? "unassigned"} · Requested {formatTimestamp(approval.requested_at)}{approval.reviewed_at ? ` · Reviewed ${formatTimestamp(approval.reviewed_at)}` : ""}</p>{approval.status === "pending" && canDecideApprovals && <div className="mt-3 flex gap-2"><Button onClick={() => void decide(approval, "approve")} disabled={acting}>{acting ? "Saving…" : "Approve"}</Button><Button variant="secondary" onClick={() => void decide(approval, "reject")} disabled={acting}>{acting ? "Saving…" : "Reject"}</Button></div>}</div>)}
+        {approvals.some((approval) => approval.status === "pending") && !canDecideApprovals && <p className="mt-3 text-xs text-[var(--muted)]">Only workspace owners and admins can decide pending approvals.</p>}
         {actionError && <p role="alert" className="mt-2 text-xs text-[var(--error)]">{actionError}</p>}
         {reviewedMessage && <p role="status" className="mt-2 text-xs text-[var(--success)]">{reviewedMessage}</p>}
         {!approvals.length && !approvalError && <p className="text-xs text-[var(--muted)]"><CheckCircle2 className="mr-1 inline" size={13}/>No approval requests for this execution.</p>}
@@ -206,7 +211,7 @@ function ExecutionDetails({ execution, onChanged }: { execution: Execution; onCh
   );
 }
 
-export default function ExecutionsPage() {
+export default function ExecutionsPage({ canDecideApprovals = true }: { canDecideApprovals?: boolean }) {
   const [searchValue, setSearchValue] = useState("");
   const [statusFilter, setStatusFilter] = useState<ExecutionStatus | "all">("all");
   const [page, setPage] = useState(0);
@@ -214,7 +219,9 @@ export default function ExecutionsPage() {
   const [response, setResponse] = useState<Awaited<ReturnType<typeof listExecutions>> | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [selectedExecutionId, setSelectedExecutionId] = useState<string | null>(null);
+  const [selectedExecutionId, setSelectedExecutionId] = useState<string | null>(
+    () => new URLSearchParams(window.location.search).get("execution"),
+  );
   const [selectedExecution, setSelectedExecution] = useState<Execution | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [detailReload, setDetailReload] = useState(0);
@@ -441,7 +448,7 @@ export default function ExecutionsPage() {
             </Button>
           </div>
         ) : selectedExecution ? (
-          <ExecutionDetails execution={selectedExecution} onChanged={() => { setDetailReload((value) => value + 1); setReloadList((value) => value + 1); }} />
+          <ExecutionDetails execution={selectedExecution} canDecideApprovals={canDecideApprovals} onChanged={() => { setDetailReload((value) => value + 1); setReloadList((value) => value + 1); }} />
         ) : null
       ) : null}
 

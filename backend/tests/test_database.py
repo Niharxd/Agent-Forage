@@ -467,6 +467,30 @@ def test_postgres_api_execution_and_approval_access_is_workspace_scoped(
         assert approval_list_b.status_code == 200
         approval_id = approval_list.json()[0]["approval_id"]
         approval_b_id = approval_list_b.json()[0]["approval_id"]
+        dashboard_approvals_a = client_a.get(
+            "/api/v1/approvals",
+            params={"limit": 100, "workspace_id": registration_b.json()["workspace_id"]},
+        )
+        dashboard_approvals_b = client_b.get(
+            "/api/v1/approvals",
+            params={"limit": 100, "workspace_id": registration_a.json()["workspace_id"]},
+        )
+        assert dashboard_approvals_a.status_code == 200
+        assert dashboard_approvals_b.status_code == 200
+        assert dashboard_approvals_a.json()["total"] == 1
+        assert dashboard_approvals_b.json()["total"] == 1
+        assert [item["approval_id"] for item in dashboard_approvals_a.json()["items"]] == [
+            approval_id
+        ]
+        assert [item["approval_id"] for item in dashboard_approvals_b.json()["items"]] == [
+            approval_b_id
+        ]
+        assert (
+            dashboard_approvals_a.json()["items"][0]["workflow_name"] == workflow_a.json()["name"]
+        )
+        assert (
+            dashboard_approvals_b.json()["items"][0]["workflow_name"] == workflow_b.json()["name"]
+        )
         with Session(migrated_database) as session:
             initial_event_counts = {
                 execution_a_id: session.scalar(
@@ -593,6 +617,7 @@ def test_postgres_api_execution_and_approval_access_is_workspace_scoped(
             membership.role = "member"
             session.commit()
 
+        assert client_a.get("/api/v1/auth/user-session").json()["workspace_role"] == "member"
         assert (
             client_a.post(
                 f"/api/v1/executions/{execution_a_id}/approvals/{approval_id}/approve"

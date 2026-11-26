@@ -20,6 +20,8 @@ from agentforge.api.schemas import (
     ExecutionListResponse,
     ExecutionResponse,
     PageLimit,
+    WorkflowApprovalListResponse,
+    WorkflowApprovalResponse,
 )
 from agentforge.api.services.executions import (
     ApprovalDecisionConflictError,
@@ -154,6 +156,40 @@ def list_execution_approvals(
             workspace_id=access.workspace_id,
         )
     ]
+
+
+@router.get("/approvals", response_model=WorkflowApprovalListResponse)
+def list_pending_approvals(
+    session: Annotated[Session, Depends(get_db_session)],
+    access: Annotated[WorkflowAccess, Depends(require_workflow_access)],
+    limit: PageLimit = Query(default=10),
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> WorkflowApprovalListResponse:
+    """List pending approval summaries from the authenticated workspace only."""
+    records, total = ExecutionRepository(session).list_pending_approvals(
+        limit=limit,
+        offset=offset,
+        workspace_id=access.workspace_id,
+    )
+    return WorkflowApprovalListResponse(
+        items=[
+            WorkflowApprovalResponse(
+                approval_id=approval.id,
+                execution_id=approval.execution_id,
+                workflow_name=workflow_name,
+                task_id=task_id,
+                tool_id=approval.tool_id,
+                action_description=approval.action_description,
+                status=approval.status,
+                requested_at=approval.requested_at,
+                expires_at=approval.expires_at,
+            )
+            for approval, workflow_name, task_id in records
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 def _review_approval(

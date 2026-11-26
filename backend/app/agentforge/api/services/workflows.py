@@ -1,5 +1,6 @@
 """Persistence operations for versioned workflow definitions."""
 
+from typing import Literal
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -140,13 +141,17 @@ def list_workflows(
     limit: int,
     offset: int,
     workspace_id: UUID,
+    sort: Literal["name", "updated"] = "name",
 ) -> tuple[list[WorkflowResponse], int]:
-    """Return workflows ordered by name and descending version."""
+    """Return workspace workflows ordered by name or most recent update."""
     scoped = select(Workflow).where(Workflow.workspace_id == workspace_id)
     total = session.scalar(select(func.count()).select_from(scoped.subquery())) or 0
-    records = session.scalars(
-        scoped.order_by(Workflow.name.asc(), Workflow.version.desc()).offset(offset).limit(limit)
-    ).all()
+    ordering = (
+        (Workflow.updated_at.desc(), Workflow.id.desc())
+        if sort == "updated"
+        else (Workflow.name.asc(), Workflow.version.desc())
+    )
+    records = session.scalars(scoped.order_by(*ordering).offset(offset).limit(limit)).all()
     return [workflow_response(record) for record in records], total
 
 

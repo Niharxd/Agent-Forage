@@ -97,6 +97,25 @@ export type Approval = {
   reviewed_at: string | null;
 };
 
+export type PendingApproval = {
+  approval_id: string;
+  execution_id: string;
+  workflow_name: string;
+  task_id: string | null;
+  tool_id: string | null;
+  action_description: string;
+  status: "pending";
+  requested_at: string;
+  expires_at: string;
+};
+
+export type PendingApprovalListResponse = {
+  items: PendingApproval[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
 export type PrepareResponse = { workflow: WorkflowRecord; execution: Execution };
 
 async function request<T>(path: string, signal?: AbortSignal, init?: RequestInit): Promise<T> {
@@ -135,8 +154,31 @@ export function createPlannedWorkflow(taskDescription: string, signal?: AbortSig
   return request("/workflows/prepare", signal, { method: "POST", body: JSON.stringify({ task_description: taskDescription }) });
 }
 
-export function listWorkflows(signal?: AbortSignal): Promise<{ items: WorkflowRecord[]; total: number; limit: number; offset: number }> {
-  return request("/workflows?limit=50&offset=0", signal);
+export function listWorkflows(
+  signal?: AbortSignal,
+  options: { limit?: number; offset?: number; sort?: "name" | "updated" } = {},
+): Promise<{ items: WorkflowRecord[]; total: number; limit: number; offset: number }> {
+  const params = new URLSearchParams({
+    limit: String(options.limit ?? 50),
+    offset: String(options.offset ?? 0),
+    sort: options.sort ?? "name",
+  });
+  return request(`/workflows?${params.toString()}`, signal);
+}
+
+export function getWorkflow(workflowId: string, signal?: AbortSignal): Promise<WorkflowRecord> {
+  return request(`/workflows/${encodeURIComponent(workflowId)}`, signal);
+}
+
+export function listPendingApprovals(
+  filters: { limit: number; offset: number },
+  signal?: AbortSignal,
+): Promise<PendingApprovalListResponse> {
+  const params = new URLSearchParams({
+    limit: String(filters.limit),
+    offset: String(filters.offset),
+  });
+  return request(`/approvals?${params.toString()}`, signal);
 }
 
 export function listApprovals(executionId: string, signal?: AbortSignal): Promise<Approval[]> {

@@ -35,10 +35,13 @@ class FakeSession:
         self.fail_commit = fail_commit
         self.fail_database = fail_database
         self.records: list[object] = []
+        self.workspace_role = "owner"
 
     def scalar(self, _statement: object) -> object | None:
         if self.fail_database:
             raise SQLAlchemyError("database unavailable")
+        if "workspace_memberships.role" in str(_statement):
+            return self.workspace_role
         sessions = [record for record in self.records if isinstance(record, UserSession)]
         if sessions:
             return sessions[-1]

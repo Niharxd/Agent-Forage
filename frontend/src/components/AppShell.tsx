@@ -2,8 +2,13 @@ import { useState } from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import { Header } from "./Header";
 import { Sidebar } from "./Sidebar";
+import type { AuthIdentity } from "../api/auth";
 
-export function AppShell({ onLogout, logoutError }: { onLogout: () => void; logoutError: string | null }) {
+export function AppShell({ onLogout, logoutError, identity }: {
+  onLogout: () => void;
+  logoutError: string | null;
+  identity: AuthIdentity;
+}) {
   const location = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
@@ -15,13 +20,14 @@ export function AppShell({ onLogout, logoutError }: { onLogout: () => void; logo
     <div className="min-h-screen bg-[var(--bg)] text-[var(--text)]">
       <div className="flex min-h-screen">
         <Sidebar
+          isOperator={identity.kind === "operator"}
           collapsed={collapsed}
           onToggleCollapse={() => setCollapsed((currentValue) => !currentValue)}
           mobileOpen={mobileOpen}
           onToggleMobile={handleMobileClose}
         />
-        <div className="flex min-h-screen flex-1 flex-col">
-          <Header onMenuClick={handleMenuClick} onLogout={onLogout} logoutError={logoutError} />
+        <div className="flex min-h-screen min-w-0 flex-1 flex-col">
+          <Header identity={identity} onMenuClick={handleMenuClick} onLogout={onLogout} logoutError={logoutError} />
           <main className="flex-1 p-4 md:p-6" aria-label="Main content">
             <Outlet context={{ currentPath: location.pathname }} />
           </main>

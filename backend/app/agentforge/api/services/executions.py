@@ -472,6 +472,51 @@ class ExecutionRepository:
             )
         )
 
+    def list_pending_approvals(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        workspace_id: UUID,
+    ) -> tuple[list[tuple[ApprovalRequest, str, str | None]], int]:
+        """Return unexpired pending approvals belonging to one workspace."""
+        now = datetime.now(UTC)
+        scoped = (
+            select(ApprovalRequest, Workflow.name, ExecutionStep.task_id)
+            .join(
+                WorkflowExecution,
+                ApprovalRequest.execution_id == WorkflowExecution.id,
+            )
+            .join(
+                Workflow,
+                (Workflow.id == WorkflowExecution.workflow_id)
+                & (Workflow.workspace_id == WorkflowExecution.workspace_id),
+            )
+            .outerjoin(
+                ExecutionStep,
+                ApprovalRequest.execution_step_id == ExecutionStep.id,
+            )
+            .where(
+                ApprovalRequest.status == "pending",
+                ApprovalRequest.expires_at > now,
+                WorkflowExecution.workspace_id == workspace_id,
+                Workflow.workspace_id == workspace_id,
+                or_(
+                    ApprovalRequest.execution_step_id.is_(None),
+                    ExecutionStep.execution_id == WorkflowExecution.id,
+                ),
+            )
+        )
+        total = self._session.scalar(select(func.count()).select_from(scoped.subquery())) or 0
+        rows = self._session.execute(
+            scoped.order_by(ApprovalRequest.requested_at.desc(), ApprovalRequest.id.desc())
+            .offset(offset)
+            .limit(limit)
+        ).all()
+        return [
+            (approval, workflow_name, task_id) for approval, workflow_name, task_id in rows
+        ], total
+
     def get_approval_for_execution(
         self,
         approval_id: UUID,

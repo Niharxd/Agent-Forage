@@ -35,6 +35,25 @@ def require_authenticated_user(
     return get_authenticated_user(request, db_session)
 
 
+def get_personal_workspace_role(session: Session, user: User) -> str | None:
+    """Resolve the authenticated user's active personal-workspace membership role."""
+    try:
+        role = session.scalar(
+            select(WorkspaceMembership.role)
+            .join(Workspace, WorkspaceMembership.workspace_id == Workspace.id)
+            .where(
+                WorkspaceMembership.user_id == user.id,
+                Workspace.owner_id == user.id,
+                Workspace.slug.like("personal-%"),
+                Workspace.status == "active",
+            )
+            .order_by(WorkspaceMembership.joined_at.asc())
+        )
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail="Workspace access is unavailable.") from exc
+    return role if role in VALID_WORKSPACE_ROLES else None
+
+
 def require_workflow_access(
     request: Request,
     db_session: Session = Depends(get_db_session),

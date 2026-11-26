@@ -1,6 +1,6 @@
 """Workflow definition validation and persistence endpoints."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -189,6 +189,7 @@ def get_workflows(
     access: Annotated[WorkflowAccess, Depends(require_workflow_access)],
     limit: PageLimit = Query(default=50),
     offset: Annotated[int, Query(ge=0)] = 0,
+    sort: Literal["name", "updated"] = Query(default="name"),
 ) -> WorkflowListResponse:
     """List persisted workflow definitions with pagination."""
     items, total = list_workflows(
@@ -196,6 +197,7 @@ def get_workflows(
         limit=limit,
         offset=offset,
         workspace_id=access.workspace_id,
+        sort=sort,
     )
     return WorkflowListResponse(items=items, total=total, limit=limit, offset=offset)
 

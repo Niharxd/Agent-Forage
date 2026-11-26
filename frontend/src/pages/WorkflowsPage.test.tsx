@@ -31,4 +31,16 @@ describe("WorkflowsPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /prepare for review/i }));
     await waitFor(() => expect(screen.getAllByRole("alert")[0]).toHaveTextContent(/planner is unavailable/i));
   });
+
+  it("opens a workflow linked from the dashboard even when it is outside the first list page", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input) => String(input).endsWith(`/workflows/${workflow.id}`)
+      ? response(workflow)
+      : response({ items: [], total: 101, limit: 50, offset: 0 }));
+    render(<MemoryRouter initialEntries={[`/workflows?workflow=${workflow.id}`]}><WorkflowsPage /></MemoryRouter>);
+
+    expect(await screen.findByText("Research request")).toBeInTheDocument();
+    expect(document.getElementById(`workflow-${workflow.id}`)).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith(`/workflows/${workflow.id}`))).toBe(true);
+  });
 });

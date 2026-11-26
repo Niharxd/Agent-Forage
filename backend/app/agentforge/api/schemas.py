@@ -61,6 +61,29 @@ class WorkflowListResponse(BaseModel):
     offset: int
 
 
+class WorkflowApprovalResponse(BaseModel):
+    """Safe pending approval summary for a workspace dashboard."""
+
+    approval_id: UUID
+    execution_id: UUID
+    workflow_name: str
+    task_id: str | None = None
+    tool_id: str | None = None
+    action_description: str
+    status: str
+    requested_at: datetime
+    expires_at: datetime
+
+
+class WorkflowApprovalListResponse(BaseModel):
+    """Paginated workspace-scoped pending approvals."""
+
+    items: list[WorkflowApprovalResponse]
+    total: int
+    limit: int
+    offset: int
+
+
 class WorkflowValidationIssueResponse(BaseModel):
     """Safe, machine-readable workflow validation issue."""
 
@@ -205,6 +228,12 @@ class UserResponse(BaseModel):
     account_status: str
     email_verified_at: datetime | None
     last_login_at: datetime | None
+
+
+class UserSessionResponse(UserResponse):
+    """Public user identity and their personal workspace role."""
+
+    workspace_role: str | None
 
 
 class RegistrationResponse(BaseModel):

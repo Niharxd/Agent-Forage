@@ -129,6 +129,40 @@ describe("ExecutionsPage", () => {
     expect(reviewCall?.[1]?.credentials).toBe("include");
   });
 
+  it("does not render approval decision controls for workspace members", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation((input) => {
+      const url = String(input);
+      if (url.includes("/executions?")) {
+        return Promise.resolve(jsonResponse(executionList([executionRecord()])));
+      }
+      if (url.endsWith(`/executions/${executionId}/approvals`)) {
+        return Promise.resolve(jsonResponse([{
+          approval_id: "approval-member",
+          execution_id: executionId,
+          task_id: "analyze",
+          tool_id: "calculator",
+          action_description: "Review this action.",
+          status: "pending",
+          requested_at: "2026-11-10T09:00:02Z",
+          reviewed_at: null,
+        }]));
+      }
+      if (url.endsWith(`/executions/${executionId}`)) {
+        return Promise.resolve(jsonResponse(executionRecord()));
+      }
+      return Promise.resolve(jsonResponse(executionList()));
+    });
+
+    render(<ExecutionsPage canDecideApprovals={false} />);
+    fireEvent.click(await screen.findByRole("button", { name: `View execution ${executionId}` }));
+
+    expect(await screen.findByText("Review this action.")).toBeInTheDocument();
+    expect(await screen.findByText(/only workspace owners and admins/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reject" })).not.toBeInTheDocument();
+  });
+
   it("loads persisted executions and requests the next page", async () => {
     const fetchMock = vi.mocked(fetch);
     fetchMock.mockResolvedValue(jsonResponse(executionList([executionRecord()], 30)));
