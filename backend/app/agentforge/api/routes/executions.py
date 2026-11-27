@@ -57,6 +57,11 @@ def create_execution(
     workflow = get_workflow(session, workflow_id, workspace_id=access.workspace_id)
     if workflow is None:
         raise HTTPException(status_code=404, detail="Workflow not found.")
+    if workflow.status == "archived":
+        raise HTTPException(
+            status_code=409,
+            detail="Archived workflows cannot be executed. Restore the workflow first.",
+        )
     try:
         repository = ExecutionRepository(session)
         snapshot = engine.create_execution(
@@ -280,6 +285,7 @@ def get_executions(
     offset: Annotated[int, Query(ge=0)] = 0,
     status: WorkflowStatus | None = None,
     search: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+    workflow_id: UUID | None = None,
 ) -> ExecutionListResponse:
     """List persisted executions with database-backed pagination and filters."""
     snapshots, total = ExecutionRepository(session).list_executions(
@@ -287,6 +293,7 @@ def get_executions(
         offset=offset,
         status=status,
         search=search,
+        workflow_id=workflow_id,
         workspace_id=access.workspace_id,
     )
     return ExecutionListResponse(

@@ -1,10 +1,12 @@
 """Versioned workflow persistence model."""
 
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
     CheckConstraint,
+    DateTime,
     ForeignKey,
     Integer,
     String,
@@ -70,6 +72,7 @@ class Workflow(TimestampMixin, Base):
         ForeignKey("users.id", ondelete="SET NULL"),
         index=True,
     )
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     workspace: Mapped["Workspace"] = relationship(back_populates="workflows")
     created_by: Mapped["User | None"] = relationship(

@@ -8,7 +8,11 @@ type HeaderProps = { onMenuClick: () => void; onLogout: () => void; logoutError:
 
 export function Header({ onMenuClick, onLogout, logoutError, identity }: HeaderProps) {
   const location = useLocation();
-  const current = navigationItems.find((item) => item.to === location.pathname) ?? navigationItems[0];
+  const current = navigationItems.find(
+    (item) =>
+      item.to === location.pathname
+      || (item.to !== "/" && location.pathname.startsWith(`${item.to}/`)),
+  ) ?? navigationItems[0];
   return <header className="sticky top-0 z-20 border-b border-[var(--border)] bg-[var(--bg)]/90 backdrop-blur-xl">
     <div className="flex h-[62px] items-center gap-3 px-4 md:px-8">
       <button type="button" onClick={onMenuClick} aria-label="Open navigation" className="grid h-9 w-9 place-items-center rounded-lg border border-[var(--border)] text-[var(--secondary)] md:hidden"><Menu size={18}/></button>

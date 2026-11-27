@@ -8,7 +8,7 @@ type ErrorStateProps = {
 
 export function ErrorState({
   title = "Something went wrong",
-  description = "The dashboard demo failed to render. Try refreshing the view.",
+  description = "This view could not be loaded. Try again.",
   onRetry,
 }: ErrorStateProps) {
   return (
@@ -18,7 +18,7 @@ export function ErrorState({
       {onRetry ? (
         <div className="mt-4">
           <Button variant="secondary" onClick={onRetry}>
-            Retry demo
+            Retry
           </Button>
         </div>
       ) : null}

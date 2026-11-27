@@ -21,13 +21,14 @@ from agentforge.api.auth import (
     secure_compare,
     validate_browser_origin,
 )
-from agentforge.api.dependencies import require_authenticated_user
+from agentforge.api.dependencies import get_personal_workspace_role, require_authenticated_user
 from agentforge.api.schemas import (
     LoginRequest,
     LoginResponse,
     RegistrationRequest,
     RegistrationResponse,
     UserResponse,
+    UserSessionResponse,
 )
 from agentforge.api.user_auth import (
     USER_SESSION_COOKIE,
@@ -214,9 +215,13 @@ def user_logout(
     return response
 
 
-@router.get("/user-session", response_model=UserResponse)
+@router.get("/user-session", response_model=UserSessionResponse)
 def user_session_status(
     user: User = Depends(require_authenticated_user),
-) -> UserResponse:
+    session: Session = Depends(get_db_session),
+) -> UserSessionResponse:
     """Return the identity established by the persistent public-user cookie."""
-    return UserResponse.model_validate(user)
+    return UserSessionResponse(
+        **UserResponse.model_validate(user).model_dump(),
+        workspace_role=get_personal_workspace_role(session, user),
+    )

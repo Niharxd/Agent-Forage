@@ -11,12 +11,14 @@ from agentforge.api.dependencies import (
     get_workflow_engine,
     get_workflow_orchestrator,
     require_workflow_access,
+    require_workflow_management_access,
 )
 from agentforge.api.responses import execution_response
 from agentforge.api.schemas import (
     PageLimit,
     WorkflowCreateRequest,
     WorkflowListResponse,
+    WorkflowMetadataUpdateRequest,
     WorkflowPrepareRequest,
     WorkflowPrepareResponse,
     WorkflowResponse,
@@ -29,6 +31,8 @@ from agentforge.api.services.workflows import (
     create_workflow,
     get_workflow,
     list_workflows,
+    set_workflow_archived,
+    update_workflow_metadata,
     validate_request_schema,
 )
 from agentforge.database.dependencies import get_db_session
@@ -190,6 +194,8 @@ def get_workflows(
     limit: PageLimit = Query(default=50),
     offset: Annotated[int, Query(ge=0)] = 0,
     sort: Literal["name", "updated"] = Query(default="name"),
+    search: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+    status: Literal["active", "archived", "all"] = Query(default="active"),
 ) -> WorkflowListResponse:
     """List persisted workflow definitions with pagination."""
     items, total = list_workflows(
@@ -198,8 +204,74 @@ def get_workflows(
         offset=offset,
         workspace_id=access.workspace_id,
         sort=sort,
+        search=search,
+        status=status,
     )
     return WorkflowListResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.patch("/{workflow_id}", response_model=WorkflowResponse)
+def edit_workflow_metadata(
+    workflow_id: UUID,
+    body: WorkflowMetadataUpdateRequest,
+    session: Annotated[Session, Depends(get_db_session)],
+    access: Annotated[WorkflowAccess, Depends(require_workflow_management_access)],
+) -> WorkflowResponse:
+    """Update a workflow's name or description without changing its definition."""
+    try:
+        response = update_workflow_metadata(
+            session,
+            workflow_id,
+            workspace_id=access.workspace_id,
+            user_id=access.user_id,
+            changes=body,
+        )
+    except WorkflowVersionConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Another workflow version already uses that name.",
+        ) from exc
+    if response is None:
+        raise HTTPException(status_code=404, detail="Workflow not found.")
+    return response
+
+
+@router.post("/{workflow_id}/archive", response_model=WorkflowResponse)
+def archive_workflow(
+    workflow_id: UUID,
+    session: Annotated[Session, Depends(get_db_session)],
+    access: Annotated[WorkflowAccess, Depends(require_workflow_management_access)],
+) -> WorkflowResponse:
+    """Soft archive a workflow while retaining all definitions and execution history."""
+    response = set_workflow_archived(
+        session,
+        workflow_id,
+        workspace_id=access.workspace_id,
+        user_id=access.user_id,
+        archived=True,
+    )
+    if response is None:
+        raise HTTPException(status_code=404, detail="Workflow not found.")
+    return response
+
+
+@router.post("/{workflow_id}/restore", response_model=WorkflowResponse)
+def restore_workflow(
+    workflow_id: UUID,
+    session: Annotated[Session, Depends(get_db_session)],
+    access: Annotated[WorkflowAccess, Depends(require_workflow_management_access)],
+) -> WorkflowResponse:
+    """Restore an archived workflow in the authorized workspace."""
+    response = set_workflow_archived(
+        session,
+        workflow_id,
+        workspace_id=access.workspace_id,
+        user_id=access.user_id,
+        archived=False,
+    )
+    if response is None:
+        raise HTTPException(status_code=404, detail="Workflow not found.")
+    return response
 
 
 @router.get("/{workflow_id}", response_model=WorkflowResponse)

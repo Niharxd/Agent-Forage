@@ -10,6 +10,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { DataTable } from "../components/DataTable";
 import { Dropdown } from "../components/Dropdown";
 import { WorkflowPlanGraph } from "../components/WorkflowPlanGraph";
+import { Link } from "react-router-dom";
 
 const PAGE_SIZE = 25;
 
@@ -212,6 +213,7 @@ function ExecutionDetails({ execution, onChanged, canDecideApprovals }: {
 }
 
 export default function ExecutionsPage({ canDecideApprovals = true }: { canDecideApprovals?: boolean }) {
+  const workflowIdFilter = new URLSearchParams(window.location.search).get("workflow_id");
   const [searchValue, setSearchValue] = useState("");
   const [statusFilter, setStatusFilter] = useState<ExecutionStatus | "all">("all");
   const [page, setPage] = useState(0);
@@ -238,6 +240,7 @@ export default function ExecutionsPage({ canDecideApprovals = true }: { canDecid
         offset: page * PAGE_SIZE,
         status: statusFilter === "all" ? undefined : statusFilter,
         search: searchValue,
+        workflowId: workflowIdFilter ?? undefined,
       },
       controller.signal,
     )
@@ -270,7 +273,7 @@ export default function ExecutionsPage({ canDecideApprovals = true }: { canDecid
       });
 
     return () => controller.abort();
-  }, [page, reloadList, searchValue, statusFilter]);
+  }, [page, reloadList, searchValue, statusFilter, workflowIdFilter]);
 
   useEffect(() => {
     if (!selectedExecutionId) {
@@ -347,7 +350,7 @@ export default function ExecutionsPage({ canDecideApprovals = true }: { canDecid
     setSelectedExecutionId(null);
   }
 
-  const hasFilters = searchValue.trim().length > 0 || statusFilter !== "all";
+  const hasFilters = searchValue.trim().length > 0 || statusFilter !== "all" || Boolean(workflowIdFilter);
 
   return (
     <div>
@@ -387,6 +390,12 @@ export default function ExecutionsPage({ canDecideApprovals = true }: { canDecid
           />
         </div>
       </div>
+      {workflowIdFilter && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface-alt)] px-4 py-3 text-xs text-[var(--secondary)]">
+          <span>Showing executions for workflow <span className="font-medium text-[var(--text)]">{workflowIdFilter}</span></span>
+          <Link to="/executions" className="font-medium text-[var(--accent)] hover:underline">Clear workflow filter</Link>
+        </div>
+      )}
 
       {isLoading ? (
         <LoadingState label="Loading execution history" />

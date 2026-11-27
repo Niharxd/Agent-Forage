@@ -145,6 +145,18 @@ def require_approval_access(
     return access
 
 
+def require_workflow_management_access(
+    access: WorkflowAccess = Depends(require_workflow_access),
+) -> WorkflowAccess:
+    """Require operator, owner, or admin access for workflow metadata and lifecycle changes."""
+    if not access.operator and access.role not in APPROVAL_WORKSPACE_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail="Owner or admin access is required to manage workflows.",
+        )
+    return access
+
+
 def get_workflow_engine(request: Request) -> WorkflowEngine:
     """Return the process-local workflow engine initialized by the application."""
     engine = getattr(request.app.state, "workflow_engine", None)

@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from agentforge.domain.agents import AgentRole
 from agentforge.domain.workflows.models import (
@@ -50,6 +50,41 @@ class WorkflowResponse(BaseModel):
     workflow_definition: WorkflowDefinition
     created_at: datetime
     updated_at: datetime
+    status: str = "active"
+    archived_at: datetime | None = None
+    execution_count: int = 0
+    last_execution_at: datetime | None = None
+
+
+class WorkflowMetadataUpdateRequest(BaseModel):
+    """Editable workflow metadata; security-sensitive fields are intentionally excluded."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=2_000)
+
+    @field_validator("name")
+    @classmethod
+    def name_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            raise ValueError("name must not be null")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("name must not be blank")
+        return normalized
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: str | None) -> str | None:
+        normalized = value.strip() if value is not None else None
+        return normalized or None
+
+    @model_validator(mode="after")
+    def at_least_one_field_must_be_provided(self) -> "WorkflowMetadataUpdateRequest":
+        if not self.model_fields_set:
+            raise ValueError("At least one editable metadata field is required.")
+        return self
 
 
 class WorkflowListResponse(BaseModel):

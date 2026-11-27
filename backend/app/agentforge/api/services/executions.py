@@ -581,6 +581,7 @@ class ExecutionRepository:
         offset: int,
         status: WorkflowStatus | None = None,
         search: str | None = None,
+        workflow_id: UUID | None = None,
         workspace_id: UUID | None = None,
     ) -> tuple[list[WorkflowExecutionSnapshot], int]:
         """Return filtered persisted executions in newest-first paginated order."""
@@ -593,6 +594,8 @@ class ExecutionRepository:
             workspace_id = legacy.id
         filters = [WorkflowExecution.status.in_(_API_WORKFLOW_STATUSES)]
         filters.append(WorkflowExecution.workspace_id == workspace_id)
+        if workflow_id is not None:
+            filters.append(WorkflowExecution.workflow_id == workflow_id)
         if status is not None:
             filters.append(WorkflowExecution.status == status.value)
         if search and search.strip():

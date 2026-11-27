@@ -1,20 +1,41 @@
 """Persistence operations for versioned workflow definitions."""
 
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from agentforge.api.schemas import WorkflowCreateRequest, WorkflowResponse
+from agentforge.api.schemas import (
+    WorkflowCreateRequest,
+    WorkflowMetadataUpdateRequest,
+    WorkflowResponse,
+)
 from agentforge.api.services.executions import ExecutionRepository
-from agentforge.domain.models import Workflow, Workspace
+from agentforge.domain.models import Workflow, WorkflowExecution, Workspace
 from agentforge.domain.workflows.models import WorkflowDefinition, WorkflowExecutionSnapshot
 
 
 class WorkflowVersionConflict(Exception):
     """Raised when a concurrently-created workflow version violates uniqueness."""
+
+
+WorkflowFilter = Literal["active", "archived", "all"]
+
+
+def _workflow_execution_summary(
+    session: Session,
+    workflow: Workflow,
+) -> tuple[int, datetime | None]:
+    count, last_execution_at = session.execute(
+        select(func.count(WorkflowExecution.id), func.max(WorkflowExecution.created_at)).where(
+            WorkflowExecution.workflow_id == workflow.id,
+            WorkflowExecution.workspace_id == workflow.workspace_id,
+        )
+    ).one()
+    return count, last_execution_at
 
 
 def create_workflow(
@@ -77,7 +98,7 @@ def create_planned_workflow_execution(
         raise WorkflowVersionConflict from exc
 
     try:
-        saved_workflow = workflow_response(record)
+        workflow_response(record)
     except Exception:
         session.rollback()
         raise
@@ -92,7 +113,12 @@ def create_planned_workflow_execution(
         created_by_user_id=user_id,
         actor_user_id=user_id,
     )
-    return saved_workflow
+    execution_count, last_execution_at = _workflow_execution_summary(session, record)
+    return workflow_response(
+        record,
+        execution_count=execution_count,
+        last_execution_at=last_execution_at,
+    )
 
 
 def _new_workflow_record(
@@ -132,7 +158,14 @@ def get_workflow(
             Workflow.workspace_id == workspace_id,
         )
     )
-    return workflow_response(record) if record is not None else None
+    if record is None:
+        return None
+    execution_count, last_execution_at = _workflow_execution_summary(session, record)
+    return workflow_response(
+        record,
+        execution_count=execution_count,
+        last_execution_at=last_execution_at,
+    )
 
 
 def list_workflows(
@@ -142,20 +175,128 @@ def list_workflows(
     offset: int,
     workspace_id: UUID,
     sort: Literal["name", "updated"] = "name",
+    search: str | None = None,
+    status: WorkflowFilter = "active",
 ) -> tuple[list[WorkflowResponse], int]:
-    """Return workspace workflows ordered by name or most recent update."""
-    scoped = select(Workflow).where(Workflow.workspace_id == workspace_id)
-    total = session.scalar(select(func.count()).select_from(scoped.subquery())) or 0
+    """Return filtered workspace workflows ordered by name or most recent update."""
+    filters = [Workflow.workspace_id == workspace_id]
+    if status == "active":
+        filters.append(Workflow.archived_at.is_(None))
+    elif status == "archived":
+        filters.append(Workflow.archived_at.is_not(None))
+    if search and search.strip():
+        escaped_search = (
+            search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        search_pattern = f"%{escaped_search}%"
+        filters.append(
+            or_(
+                Workflow.name.ilike(search_pattern, escape="\\"),
+                Workflow.description.ilike(search_pattern, escape="\\"),
+            )
+        )
+    total = session.scalar(select(func.count(Workflow.id)).where(*filters)) or 0
     ordering = (
         (Workflow.updated_at.desc(), Workflow.id.desc())
         if sort == "updated"
         else (Workflow.name.asc(), Workflow.version.desc())
     )
-    records = session.scalars(scoped.order_by(*ordering).offset(offset).limit(limit)).all()
-    return [workflow_response(record) for record in records], total
+    rows = session.execute(
+        select(
+            Workflow,
+            func.count(WorkflowExecution.id),
+            func.max(WorkflowExecution.created_at),
+        )
+        .outerjoin(
+            WorkflowExecution,
+            (WorkflowExecution.workflow_id == Workflow.id)
+            & (WorkflowExecution.workspace_id == Workflow.workspace_id),
+        )
+        .where(*filters)
+        .group_by(Workflow.id)
+        .order_by(*ordering)
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    return [
+        workflow_response(
+            record,
+            execution_count=execution_count,
+            last_execution_at=last_execution_at,
+        )
+        for record, execution_count, last_execution_at in rows
+    ], total
 
 
-def workflow_response(record: Workflow) -> WorkflowResponse:
+def update_workflow_metadata(
+    session: Session,
+    workflow_id: UUID,
+    *,
+    workspace_id: UUID,
+    user_id: UUID | None,
+    changes: WorkflowMetadataUpdateRequest,
+) -> WorkflowResponse | None:
+    """Update only editable metadata on a workflow inside the authorized workspace."""
+    record = session.scalar(
+        select(Workflow)
+        .where(Workflow.id == workflow_id, Workflow.workspace_id == workspace_id)
+        .with_for_update()
+    )
+    if record is None:
+        return None
+    if "name" in changes.model_fields_set and changes.name is not None:
+        record.name = changes.name
+    if "description" in changes.model_fields_set:
+        record.description = changes.description
+    record.updated_by_user_id = user_id
+    try:
+        session.commit()
+        session.refresh(record)
+    except IntegrityError as exc:
+        session.rollback()
+        raise WorkflowVersionConflict from exc
+    execution_count, last_execution_at = _workflow_execution_summary(session, record)
+    return workflow_response(
+        record,
+        execution_count=execution_count,
+        last_execution_at=last_execution_at,
+    )
+
+
+def set_workflow_archived(
+    session: Session,
+    workflow_id: UUID,
+    *,
+    workspace_id: UUID,
+    user_id: UUID | None,
+    archived: bool,
+) -> WorkflowResponse | None:
+    """Soft archive or restore a workflow without changing its definition or history."""
+    record = session.scalar(
+        select(Workflow)
+        .where(Workflow.id == workflow_id, Workflow.workspace_id == workspace_id)
+        .with_for_update()
+    )
+    if record is None:
+        return None
+    record.archived_at = datetime.now(UTC) if archived else None
+    record.updated_by_user_id = user_id
+    session.commit()
+    session.refresh(record)
+    execution_count, last_execution_at = _workflow_execution_summary(session, record)
+    return workflow_response(
+        record,
+        execution_count=execution_count,
+        last_execution_at=last_execution_at,
+    )
+
+
+def workflow_response(
+    record: Workflow,
+    *,
+    execution_count: int = 0,
+    last_execution_at: datetime | None = None,
+) -> WorkflowResponse:
     """Convert a persistence model into the public response contract."""
     return WorkflowResponse(
         id=record.id,
@@ -165,6 +306,10 @@ def workflow_response(record: Workflow) -> WorkflowResponse:
         workflow_definition=WorkflowDefinition.model_validate(record.workflow_definition),
         created_at=record.created_at,
         updated_at=record.updated_at,
+        status="archived" if record.archived_at is not None else "active",
+        archived_at=record.archived_at,
+        execution_count=execution_count,
+        last_execution_at=last_execution_at,
     )
 
 

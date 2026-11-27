@@ -21,6 +21,8 @@ export default function App() {
   const emailRef = useRef<HTMLInputElement>(null);
   const passwordRef = useRef<HTMLInputElement>(null);
   const credentialRef = useRef<HTMLInputElement>(null);
+  const canManageWorkflows = identity?.kind === "operator"
+    || (identity?.kind === "user" && (identity.workspaceRole === "owner" || identity.workspaceRole === "admin"));
   useEffect(() => {
     let active = true;
     restoreSession().then((value) => { if (active) setIdentity(value); })
@@ -92,7 +94,8 @@ export default function App() {
         <Routes>
           <Route element={<AppShell identity={identity} onLogout={() => void signOut()} logoutError={error} />}>
             <Route path="/" element={identity.kind === "user" ? <UserDashboardPage /> : <DashboardPage />} />
-            <Route path="/workflows" element={<WorkflowsPage />} />
+            <Route path="/workflows" element={<WorkflowsPage canManageWorkflows={canManageWorkflows} />} />
+            <Route path="/workflows/:workflowId" element={<WorkflowsPage canManageWorkflows={canManageWorkflows} />} />
             <Route path="/agents" element={identity.kind === "operator" ? <AgentsPage /> : <Navigate to="/" replace />} />
             <Route path="/tools" element={identity.kind === "operator" ? <ToolsPage /> : <Navigate to="/" replace />} />
             <Route path="/executions" element={<ExecutionsPage canDecideApprovals={identity.kind === "operator" || identity.workspaceRole === "owner" || identity.workspaceRole === "admin"} />} />

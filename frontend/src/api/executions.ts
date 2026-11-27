@@ -74,6 +74,7 @@ export type ExecutionListFilters = {
   offset: number;
   status: ExecutionStatus | undefined;
   search: string;
+  workflowId?: string;
 };
 
 export type WorkflowRecord = {
@@ -81,9 +82,20 @@ export type WorkflowRecord = {
   name: string;
   description: string | null;
   version: number;
-  workflow_definition: { tasks: Array<{ task_id: string }> };
+  workflow_definition: {
+    tasks: Array<{
+      task_id: string;
+      agent_type?: string;
+      dependency_ids?: string[];
+      description?: string | null;
+    }>;
+  };
   created_at: string;
   updated_at: string;
+  status?: "active" | "archived";
+  archived_at?: string | null;
+  execution_count?: number;
+  last_execution_at?: string | null;
 };
 
 export type Approval = {
@@ -156,18 +168,48 @@ export function createPlannedWorkflow(taskDescription: string, signal?: AbortSig
 
 export function listWorkflows(
   signal?: AbortSignal,
-  options: { limit?: number; offset?: number; sort?: "name" | "updated" } = {},
+  options: {
+    limit?: number;
+    offset?: number;
+    sort?: "name" | "updated";
+    search?: string;
+    status?: "active" | "archived" | "all";
+  } = {},
 ): Promise<{ items: WorkflowRecord[]; total: number; limit: number; offset: number }> {
   const params = new URLSearchParams({
     limit: String(options.limit ?? 50),
     offset: String(options.offset ?? 0),
     sort: options.sort ?? "name",
+    status: options.status ?? "active",
   });
+  if (options.search?.trim()) params.set("search", options.search.trim());
   return request(`/workflows?${params.toString()}`, signal);
 }
 
 export function getWorkflow(workflowId: string, signal?: AbortSignal): Promise<WorkflowRecord> {
   return request(`/workflows/${encodeURIComponent(workflowId)}`, signal);
+}
+
+export function updateWorkflowMetadata(
+  workflowId: string,
+  changes: { name?: string; description?: string | null },
+): Promise<WorkflowRecord> {
+  return request(`/workflows/${encodeURIComponent(workflowId)}`, undefined, {
+    method: "PATCH",
+    body: JSON.stringify(changes),
+  });
+}
+
+export function archiveWorkflow(workflowId: string): Promise<WorkflowRecord> {
+  return request(`/workflows/${encodeURIComponent(workflowId)}/archive`, undefined, {
+    method: "POST",
+  });
+}
+
+export function restoreWorkflow(workflowId: string): Promise<WorkflowRecord> {
+  return request(`/workflows/${encodeURIComponent(workflowId)}/restore`, undefined, {
+    method: "POST",
+  });
 }
 
 export function listPendingApprovals(
@@ -210,6 +252,9 @@ export function listExecutions(
   }
   if (filters.search.trim()) {
     params.set("search", filters.search.trim());
+  }
+  if (filters.workflowId) {
+    params.set("workflow_id", filters.workflowId);
   }
   return request(`/executions?${params.toString()}`, signal);
 }

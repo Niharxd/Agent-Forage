@@ -75,6 +75,7 @@ export function WorkflowPlanGraph({ tasks }: { tasks: ExecutionPlanTask[] }) {
   const rowCount = Math.max(1, ...Array.from(columns.values(), (column) => column.length));
   const width = PADDING * 2 + columnCount * NODE_WIDTH + (columnCount - 1) * COLUMN_GAP;
   const height = PADDING * 2 + rowCount * NODE_HEIGHT + (rowCount - 1) * ROW_GAP;
+  const fitsCard = width <= 640;
 
   return (
     <div className="space-y-4">
@@ -83,9 +84,9 @@ export function WorkflowPlanGraph({ tasks }: { tasks: ExecutionPlanTask[] }) {
           role="img"
           aria-label="Workflow dependency graph"
           viewBox={`0 0 ${width} ${height}`}
-          width={width}
-          height={height}
-          className="max-w-none"
+          width={fitsCard ? "100%" : width}
+          height={fitsCard ? "auto" : height}
+          className={fitsCard ? "block h-auto w-full" : "max-w-none"}
         >
           {tasks.flatMap((task) =>
             task.dependency_ids.flatMap((dependencyId) => {

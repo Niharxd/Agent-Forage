@@ -180,12 +180,15 @@ SQLAlchemy models and raw exception messages are not returned.
 |---|---|---|
 | `POST` | `/workflows/prepare` | Plan a bounded `task_description`, persist the versioned workflow and pending execution in one transaction, and return the draft for review. Does not start work. |
 | `POST` | `/workflows` | Validate and persist a new workflow version. Returns its ID, definition, version, and timestamps. |
-| `GET` | `/workflows?limit=50&offset=0` | List persisted workflow versions. |
+| `GET` | `/workflows?limit=50&offset=0&sort=updated&status=active` | List workspace-scoped workflow versions with optional case-insensitive name/description `search`, `status` (`active`, `archived`, or `all`), and `sort` (`name` or `updated`) filters. Results include execution count and latest execution time. |
 | `GET` | `/workflows/{workflow_id}` | Retrieve one persisted workflow version. |
+| `PATCH` | `/workflows/{workflow_id}` | Update only `name` and/or `description`; rejects other fields and preserves the workflow definition and execution history. Owner/admin or operator access is required. |
+| `POST` | `/workflows/{workflow_id}/archive` | Soft-archive a workflow without deleting its definition or execution history. Owner/admin or operator access is required. |
+| `POST` | `/workflows/{workflow_id}/restore` | Restore an archived workflow. Owner/admin or operator access is required. |
 | `POST` | `/workflows/validate` | Validate the definition and tool permissions without persisting it; returns `valid` and safe issue codes/locations. |
 | `POST` | `/workflows/{workflow_id}/executions` | Persist a pending execution and task records without invoking agents or tools. |
 | `POST` | `/executions/{execution_id}/start` | Explicitly run pending work through the existing orchestrator and workflow engine. |
-| `GET` | `/executions?limit=50&offset=0` | List persisted executions with database-backed pagination; optional `status` and case-insensitive `search` filters match workflow names or execution IDs. |
+| `GET` | `/executions?limit=50&offset=0` | List persisted executions with database-backed pagination; optional `status`, case-insensitive `search`, and workspace-scoped `workflow_id` filters are supported. |
 | `GET` | `/executions/{execution_id}` | Reconstruct execution status, lifecycle events, task-level results, and execution order from PostgreSQL. |
 | `POST` | `/executions/{execution_id}/cancel` | Cancel pending work or request cooperative cancellation while running. |
 | `POST` | `/auth/session` | Verify the shared operator credential and issue an HttpOnly browser session cookie. |
@@ -199,6 +202,14 @@ Workflow definitions are stored in the existing PostgreSQL `workflows` table.
 Creating another definition with the same name creates its next version under
 the existing unique `(name, version)` constraint. The API does not introduce
 another workflow or execution table.
+
+Workflow metadata updates accept only `name` and `description`; request
+ownership, workspace, creator, and definition fields are rejected. Archive and
+restore use the nullable `workflows.archived_at` timestamp. Archived workflows
+remain readable and their executions remain available, but new executions are
+blocked until restore. These operations are restricted to workspace owners and
+admins; the separate operator authentication path remains supported. Workflow
+definitions are not editable through this metadata endpoint.
 
 `POST /workflows/prepare` accepts a non-blank task description of at most
 10,000 characters. It uses the configured Planner (`mock` by default), returns

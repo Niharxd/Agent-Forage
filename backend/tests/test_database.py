@@ -339,6 +339,206 @@ def test_postgres_api_cross_workspace_workflow_access_is_denied(
         assert unauthenticated.get(f"/api/v1/workflows/{workflow_id}").status_code == 401
 
 
+def test_postgres_workflow_management_preserves_history_and_enforces_workspace_boundaries(
+    migrated_database: Engine,
+) -> None:
+    password = "StrongPassword123"
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        cors_origins=["http://localhost:5173"],
+        api_access_token=SecretStr("operator-secret"),
+        session_signing_secret=SecretStr("s" * 40),
+    )
+
+    def db_session_override() -> Iterator[Session]:
+        with Session(migrated_database) as session:
+            yield session
+
+    application = create_app(settings)
+    application.dependency_overrides[get_db_session] = db_session_override
+    email_a = f"workflow-owner-{uuid4().hex}@example.com"
+    email_b = f"workflow-other-{uuid4().hex}@example.com"
+
+    with TestClient(application) as registration_client:
+        for email in (email_a, email_b):
+            registered = registration_client.post(
+                "/api/v1/auth/register",
+                json={"email": email, "password": password},
+                headers={"Origin": "http://localhost:5173"},
+            )
+            assert registered.status_code == 201
+
+    with TestClient(application) as client_a, TestClient(application) as client_b:
+        for client, email in ((client_a, email_a), (client_b, email_b)):
+            login = client.post(
+                "/api/v1/auth/login",
+                json={"email": email, "password": password},
+                headers={"Origin": "http://localhost:5173"},
+            )
+            assert login.status_code == 200
+
+        payload = {
+            "name": f"management-{uuid4().hex}",
+            "description": "Original workflow summary.",
+            "tasks": [
+                {
+                    "task_id": "analyze",
+                    "agent_type": "analyst",
+                    "description": "Review the source material.",
+                }
+            ],
+        }
+        created = client_a.post("/api/v1/workflows", json=payload)
+        assert created.status_code == 201, created.text
+        workflow = created.json()
+        workflow_id = workflow["id"]
+        original_definition = workflow["workflow_definition"]
+
+        execution = client_a.post(f"/api/v1/workflows/{workflow_id}/executions")
+        assert execution.status_code == 201, execution.text
+
+        forged_update = client_a.patch(
+            f"/api/v1/workflows/{workflow_id}",
+            json={
+                "name": "Forged workflow",
+                "workspace_id": str(uuid4()),
+                "created_by_user_id": str(uuid4()),
+                "workflow_definition": {"tasks": []},
+            },
+        )
+        assert forged_update.status_code == 422
+
+        updated = client_a.patch(
+            f"/api/v1/workflows/{workflow_id}",
+            json={"name": "Updated workflow", "description": "Updated searchable description."},
+        )
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["name"] == "Updated workflow"
+        assert updated.json()["workflow_definition"] == original_definition
+        assert updated.json()["execution_count"] == 1
+        assert updated.json()["status"] == "active"
+
+        searched = client_a.get(
+            "/api/v1/workflows",
+            params={"search": "SEARCHABLE DESCRIPTION", "status": "active", "sort": "updated"},
+        )
+        assert searched.status_code == 200
+        assert [item["id"] for item in searched.json()["items"]] == [workflow_id]
+
+        archived = client_a.post(f"/api/v1/workflows/{workflow_id}/archive")
+        assert archived.status_code == 200
+        assert archived.json()["status"] == "archived"
+        assert archived.json()["archived_at"] is not None
+        assert archived.json()["workflow_definition"] == original_definition
+        assert archived.json()["execution_count"] == 1
+        active_list = client_a.get("/api/v1/workflows")
+        assert workflow_id not in {item["id"] for item in active_list.json()["items"]}
+        archived_list = client_a.get("/api/v1/workflows", params={"status": "archived"})
+        assert [item["id"] for item in archived_list.json()["items"]] == [workflow_id]
+        assert client_a.post(f"/api/v1/workflows/{workflow_id}/executions").status_code == 409
+        assert (
+            client_a.get(f"/api/v1/executions/{execution.json()['execution_id']}").status_code
+            == 200
+        )
+        history = client_a.get("/api/v1/executions", params={"workflow_id": workflow_id})
+        assert history.status_code == 200
+        assert history.json()["total"] == 1
+
+        assert client_b.get(f"/api/v1/workflows/{workflow_id}").status_code == 404
+        assert (
+            client_b.patch(
+                f"/api/v1/workflows/{workflow_id}",
+                json={"name": "Cross-workspace update"},
+            ).status_code
+            == 404
+        )
+        assert client_b.post(f"/api/v1/workflows/{workflow_id}/archive").status_code == 404
+        assert client_b.post(f"/api/v1/workflows/{workflow_id}/restore").status_code == 404
+        assert (
+            client_b.get(
+                "/api/v1/executions",
+                params={"workflow_id": workflow_id},
+            ).json()["total"]
+            == 0
+        )
+
+        with Session(migrated_database) as session:
+            workflow_workspace_id = session.scalar(
+                select(Workflow.workspace_id).where(Workflow.id == UUID(workflow_id))
+            )
+            owner_id = session.scalar(
+                select(Workspace.owner_id).where(Workspace.id == workflow_workspace_id)
+            )
+            membership = session.scalar(
+                select(WorkspaceMembership).where(
+                    WorkspaceMembership.user_id == owner_id,
+                    WorkspaceMembership.workspace_id == workflow_workspace_id,
+                )
+            )
+            assert membership is not None
+            membership.role = "member"
+            session.commit()
+
+        assert (
+            client_a.patch(
+                f"/api/v1/workflows/{workflow_id}",
+                json={"description": "Member cannot edit"},
+            ).status_code
+            == 403
+        )
+        assert client_a.post(f"/api/v1/workflows/{workflow_id}/archive").status_code == 403
+        assert client_a.post(f"/api/v1/workflows/{workflow_id}/restore").status_code == 403
+
+
+def test_postgres_operator_can_manage_legacy_workflows(migrated_database: Engine) -> None:
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        api_access_token=SecretStr("operator-secret"),
+        session_signing_secret=SecretStr("s" * 40),
+    )
+
+    def db_session_override() -> Iterator[Session]:
+        with Session(migrated_database) as session:
+            yield session
+
+    application = create_app(settings)
+    application.dependency_overrides[get_db_session] = db_session_override
+    with TestClient(application) as operator:
+        headers = {"Authorization": "Bearer operator-secret"}
+        created = operator.post(
+            "/api/v1/workflows",
+            headers=headers,
+            json={
+                "name": f"operator-workflow-{uuid4().hex}",
+                "tasks": [{"task_id": "analyze", "agent_type": "analyst"}],
+            },
+        )
+        assert created.status_code == 201, created.text
+        workflow_id = created.json()["id"]
+        assert (
+            operator.patch(
+                f"/api/v1/workflows/{workflow_id}",
+                headers=headers,
+                json={"description": "Managed by the operator."},
+            ).status_code
+            == 200
+        )
+        assert (
+            operator.post(f"/api/v1/workflows/{workflow_id}/archive", headers=headers).json()[
+                "status"
+            ]
+            == "archived"
+        )
+        assert (
+            operator.post(f"/api/v1/workflows/{workflow_id}/restore", headers=headers).json()[
+                "status"
+            ]
+            == "active"
+        )
+
+
 def test_postgres_api_execution_and_approval_access_is_workspace_scoped(
     migrated_database: Engine,
 ) -> None:
