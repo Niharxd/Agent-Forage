@@ -40,6 +40,23 @@ Login failures are throttled per client for a short cooling-off window.
 Production CORS origins must use HTTPS; local HTTP origins are permitted only
 for development and test configurations.
 
+### Platform admin console identity limitation
+
+The platform administration console currently authenticates with the existing
+shared operator credential and its browser session. It has no durable human
+administrator identities, individual action attribution, or independent
+platform-admin accounts. Audit rows record the actor category as `operator`,
+not a person. This interim limitation must be resolved before public beta.
+Because the operator principal is not associated with a managed User account,
+the console cannot identify an operator's own account for a self-suspension
+guard. Suspending any public User does not revoke the separate operator
+browser session. A per-admin self-suspension safeguard depends on replacing the
+shared credential with durable administrator identities before public beta.
+Platform privileges must never be inferred from workspace roles, and human
+attribution must not be created from client-supplied identity fields. Platform
+audit rows are protected from UPDATE and DELETE by a PostgreSQL trigger and
+have no public API mutation route.
+
 - User input, model output, tool output, and content retrieved by tools are untrusted.
 - Provider responses may be malformed, adversarially influenced, incomplete, or false.
 - The operator is trusted to configure the service and approve displayed actions; the MVP does not provide multi-party approval.

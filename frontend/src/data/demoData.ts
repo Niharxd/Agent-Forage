@@ -24,6 +24,7 @@ export const navigationItems: NavItem[] = [
   { label: "Agents", to: "/agents", icon: Bot },
   { label: "Tools", to: "/tools", icon: Wrench },
   { label: "Executions", to: "/executions", icon: Activity },
+  { label: "Platform admin", to: "/platform-admin", icon: ShieldCheck },
   { label: "Settings", to: "/settings", icon: Settings2 },
 ];
 

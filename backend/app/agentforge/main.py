@@ -20,6 +20,7 @@ from agentforge.api.middleware import RequestSizeLimitMiddleware
 from agentforge.api.routes.auth import router as auth_router
 from agentforge.api.routes.executions import router as executions_router
 from agentforge.api.routes.health import router as health_router
+from agentforge.api.routes.platform_admin import router as platform_admin_router
 from agentforge.api.routes.workflows import router as workflows_router
 from agentforge.config.settings import Settings
 from agentforge.database.engine import create_database_engine, create_session_factory
@@ -110,6 +111,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.add_exception_handler(Exception, unhandled_exception_handler)
     application.include_router(health_router, prefix="/api/v1")
     application.include_router(auth_router, prefix="/api/v1")
+    application.include_router(platform_admin_router, prefix="/api/v1")
     application.include_router(
         workflows_router,
         prefix="/api/v1",

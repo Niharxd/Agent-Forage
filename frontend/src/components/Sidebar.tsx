@@ -1,4 +1,4 @@
-import { Activity, Bot, Boxes, ChevronLeft, ChevronRight, LayoutDashboard, Settings2, Workflow, X } from "lucide-react";
+import { Activity, Bot, Boxes, ChevronLeft, ChevronRight, LayoutDashboard, Settings2, Workflow, X, Shield } from "lucide-react";
 import { NavLink } from "react-router-dom";
 
 const items = [
@@ -7,13 +7,14 @@ const items = [
   { to: "/executions", label: "Executions", icon: Activity },
   { to: "/agents", label: "Agents", icon: Bot },
   { to: "/tools", label: "Tools", icon: Boxes },
+  { to: "/platform-admin", label: "Platform admin", icon: Shield },
   { to: "/settings", label: "Settings", icon: Settings2 },
 ];
 
 type SidebarProps = { collapsed: boolean; onToggleCollapse: () => void; mobileOpen: boolean; onToggleMobile: () => void; isOperator: boolean };
 
 export function Sidebar({ collapsed, onToggleCollapse, mobileOpen, onToggleMobile, isOperator }: SidebarProps) {
-  const visibleItems = isOperator ? items : items.filter(({ to }) => to !== "/agents" && to !== "/tools");
+  const visibleItems = isOperator ? items : items.filter(({ to }) => to !== "/agents" && to !== "/tools" && to !== "/platform-admin");
   return <>
     <aside className={`fixed inset-y-0 left-0 z-40 flex w-[260px] flex-col border-r border-[var(--border)] bg-[var(--sidebar)] px-3 py-5 transition-all md:static md:translate-x-0 ${mobileOpen ? "translate-x-0" : "-translate-x-full"} ${collapsed ? "md:w-[78px]" : "md:w-[248px]"}`} aria-label="Sidebar navigation">
       <div className={`mb-7 flex items-center justify-between px-2 ${collapsed ? "h-11" : "h-[74px]"}`}>

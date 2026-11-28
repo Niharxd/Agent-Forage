@@ -11,6 +11,7 @@ import ToolsPage from "./pages/ToolsPage";
 import WorkflowsPage from "./pages/WorkflowsPage";
 import { ThemeProvider } from "./theme/ThemeContext";
 import UserDashboardPage from "./pages/UserDashboardPage";
+import PlatformAdminPage from "./pages/PlatformAdminPage";
 
 export default function App() {
   const [identity, setIdentity] = useState<AuthIdentity | null>(null);
@@ -98,6 +99,7 @@ export default function App() {
             <Route path="/workflows/:workflowId" element={<WorkflowsPage canManageWorkflows={canManageWorkflows} />} />
             <Route path="/agents" element={identity.kind === "operator" ? <AgentsPage /> : <Navigate to="/" replace />} />
             <Route path="/tools" element={identity.kind === "operator" ? <ToolsPage /> : <Navigate to="/" replace />} />
+            <Route path="/platform-admin" element={identity.kind === "operator" ? <PlatformAdminPage /> : <Navigate to="/" replace />} />
             <Route path="/executions" element={<ExecutionsPage canDecideApprovals={identity.kind === "operator" || identity.workspaceRole === "owner" || identity.workspaceRole === "admin"} />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />

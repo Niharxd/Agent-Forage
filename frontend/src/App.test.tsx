@@ -23,6 +23,7 @@ describe("AgentForge application shell", () => {
     expect(screen.getByRole("img", { name: "AgentForge" })).toHaveAttribute("src", "/assets/agentforge-logo.png");
     expect(screen.getByText("Operator console")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /agents/i })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /platform admin/i })).toBeInTheDocument();
     expect(screen.queryByLabelText(/operator credential/i)).not.toBeInTheDocument();
     expect(screen.getByText(/recent executions/i)).toBeInTheDocument();
   });
@@ -143,6 +144,7 @@ describe("AgentForge application shell", () => {
     expect(await screen.findByRole("heading", { name: /your workspace/i })).toBeInTheDocument();
     expect(screen.getAllByText("Personal workspace")).toHaveLength(2);
     expect(screen.queryByRole("link", { name: /agents/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /platform admin/i })).not.toBeInTheDocument();
     expect(window.localStorage.getItem("agentforge-auth-mode")).toBe("user");
 
     fireEvent.click(screen.getByRole("button", { name: /sign out/i }));

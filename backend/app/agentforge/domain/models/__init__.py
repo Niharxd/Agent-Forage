@@ -8,6 +8,7 @@ from agentforge.domain.models.execution import (
     ToolExecutionRecord,
     WorkflowExecution,
 )
+from agentforge.domain.models.platform_admin_audit import PlatformAdminAudit
 from agentforge.domain.models.user import User
 from agentforge.domain.models.user_session import UserSession
 from agentforge.domain.models.workflow import Workflow
@@ -21,6 +22,7 @@ __all__ = [
     "ToolExecutionRecord",
     "User",
     "UserSession",
+    "PlatformAdminAudit",
     "Workspace",
     "WorkspaceMembership",
     "Workflow",

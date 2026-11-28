@@ -30,6 +30,7 @@ from agentforge.domain.models import (
     Base,
     ExecutionEvent,
     ExecutionStep,
+    PlatformAdminAudit,
     ToolExecutionRecord,
     User,
     UserSession,
@@ -103,6 +104,9 @@ def migrated_database() -> Iterator[Engine]:
             connection.execute(
                 text("DROP FUNCTION IF EXISTS public.prevent_execution_event_mutation()")
             )
+            connection.execute(
+                text("DROP FUNCTION IF EXISTS public.prevent_platform_admin_audit_mutation()")
+            )
 
         with engine.connect() as connection:
             command.upgrade(_alembic_config(connection), "head")
@@ -115,6 +119,9 @@ def migrated_database() -> Iterator[Engine]:
                 connection.execute(text("DROP TABLE IF EXISTS alembic_version"))
                 connection.execute(
                     text("DROP FUNCTION IF EXISTS public.prevent_execution_event_mutation()")
+                )
+                connection.execute(
+                    text("DROP FUNCTION IF EXISTS public.prevent_platform_admin_audit_mutation()")
                 )
         finally:
             engine.dispose()
@@ -2846,3 +2853,330 @@ def test_openai_browser_session_authenticates_workflow_execution_and_approvals(
         assert client.get("/api/v1/workflows").status_code == 401
         assert client.get("/api/v1/executions").status_code == 401
         assert client.get(approvals_url).status_code == 401
+
+
+def test_platform_admin_operations_audit_and_sensitive_field_exclusion(
+    migrated_database: Engine,
+) -> None:
+    origin = "http://localhost:5173"
+    operator_credential = "platform-admin-test-token"
+    settings = Settings(
+        _env_file=None,
+        app_env="test",
+        cors_origins=[origin],
+        api_access_token=SecretStr(operator_credential),
+        session_signing_secret=SecretStr("a" * 48),
+    )
+
+    def session_override() -> Iterator[Session]:
+        with Session(migrated_database) as session:
+            yield session
+
+    app = create_app(settings)
+    app.dependency_overrides[get_db_session] = session_override
+    password = "StrongPassword123"
+    suffix = uuid4().hex
+    users = [
+        User(
+            email=f"admin-target-{suffix}@example.com",
+            password_hash=hash_password(password),
+            account_status="active",
+        ),
+        User(
+            email=f"admin-pending-{suffix}@example.com",
+            password_hash=hash_password(password),
+            account_status="pending",
+        ),
+        User(
+            email=f"admin-suspended-{suffix}@example.com",
+            password_hash=hash_password(password),
+            account_status="suspended",
+        ),
+        User(
+            email=f"admin-workspace-owner-{suffix}@example.com",
+            password_hash=hash_password(password),
+            account_status="active",
+        ),
+        User(
+            email=f"admin-workspace-admin-{suffix}@example.com",
+            password_hash=hash_password(password),
+            account_status="active",
+        ),
+        User(
+            email=f"admin-workspace-member-{suffix}@example.com",
+            password_hash=hash_password(password),
+            account_status="active",
+        ),
+    ]
+    workspace = Workspace(
+        name=f"Admin fixture {suffix}",
+        slug=f"admin-fixture-{suffix}",
+        owner=users[3],
+        status="active",
+    )
+    workspace.memberships.extend(
+        [
+            WorkspaceMembership(user=users[3], role="owner"),
+            WorkspaceMembership(user=users[4], role="admin"),
+            WorkspaceMembership(user=users[5], role="member"),
+        ]
+    )
+    with Session(migrated_database) as session:
+        baseline_users = session.scalar(select(func.count()).select_from(User)) or 0
+        baseline_user_statuses = dict(
+            session.execute(
+                select(User.account_status, func.count()).group_by(User.account_status)
+            ).all()
+        )
+        baseline_workspaces = session.scalar(select(func.count()).select_from(Workspace)) or 0
+        baseline_workflows = session.scalar(select(func.count()).select_from(Workflow)) or 0
+        baseline_executions = (
+            session.scalar(select(func.count()).select_from(WorkflowExecution)) or 0
+        )
+        session.add_all(users)
+        session.add(workspace)
+        session.flush()
+        workflow = Workflow(
+            name=f"Admin workflow {suffix}",
+            workflow_definition={},
+            version=1,
+            workspace_id=workspace.id,
+        )
+        session.add(workflow)
+        session.flush()
+        execution = WorkflowExecution(
+            workspace_id=workspace.id,
+            workflow_id=workflow.id,
+            original_task="platform admin integration test",
+            status="submitted",
+        )
+        session.add(execution)
+        session.commit()
+        user_ids = [user.id for user in users]
+        workspace_id = workspace.id
+        target_id = users[0].id
+        workflow_count = session.scalar(
+            select(func.count()).select_from(Workflow).where(Workflow.workspace_id == workspace.id)
+        )
+        execution_count = session.scalar(
+            select(func.count())
+            .select_from(WorkflowExecution)
+            .where(WorkflowExecution.workspace_id == workspace.id)
+        )
+
+    with TestClient(app) as operator:
+        login = operator.post(
+            "/api/v1/auth/session",
+            json={"credential": operator_credential},
+            headers={"Origin": origin},
+        )
+        assert login.status_code == 200
+        overview = operator.get("/api/v1/platform-admin/overview")
+        assert overview.status_code == 200, overview.text
+        stats = overview.json()
+        assert stats["users"]["total"] == baseline_users + len(users)
+        assert stats["users"]["active"] == baseline_user_statuses.get("active", 0) + 4
+        assert stats["users"]["pending"] == baseline_user_statuses.get("pending", 0) + 1
+        assert stats["users"]["suspended"] == baseline_user_statuses.get("suspended", 0) + 1
+        assert stats["workspaces"] == baseline_workspaces + 1
+        assert stats["workflows"] == baseline_workflows + 1
+        assert stats["executions"] == baseline_executions + 1
+
+        found = operator.get(f"/api/v1/platform-admin/users?q=admin-target-{suffix}")
+        assert found.status_code == 200
+        assert found.json()["total"] == 1
+        assert found.json()["items"][0]["id"] == str(target_id)
+        assert "password_hash" not in found.text
+        assert "session_hash" not in found.text
+        filtered = operator.get("/api/v1/platform-admin/users?status=pending")
+        assert filtered.status_code == 200
+        assert all(user["account_status"] == "pending" for user in filtered.json()["items"])
+        assert str(users[1].id) in {user["id"] for user in filtered.json()["items"]}
+        detail = operator.get(f"/api/v1/platform-admin/users/{target_id}")
+        assert detail.status_code == 200
+        assert detail.json()["email"] == f"admin-target-{suffix}@example.com"
+        assert "password_hash" not in detail.text
+        assert "session_hash" not in detail.text
+        assert operator.get(f"/api/v1/platform-admin/users/{uuid4()}").status_code == 404
+        owner_detail = operator.get(f"/api/v1/platform-admin/users/{user_ids[3]}")
+        assert owner_detail.status_code == 200
+        assert owner_detail.json()["workspaces"][0]["role"] == "owner"
+        missing_update = operator.patch(
+            f"/api/v1/platform-admin/users/{uuid4()}/status",
+            json={"status": "suspended"},
+            headers={"Origin": origin},
+        )
+        assert missing_update.status_code == 404
+
+        workspace_result = operator.get(f"/api/v1/platform-admin/workspaces?q={suffix}")
+        assert workspace_result.status_code == 200
+        assert workspace_result.json()["total"] == 1
+        workspace_row = workspace_result.json()["items"][0]
+        assert workspace_row["id"] == str(workspace_id)
+        assert workspace_row["owner"]["email"] == users[3].email
+        assert {row["role"] for row in workspace_row["members"]} == {"owner", "admin", "member"}
+        assert workspace_row["workflow_count"] == workflow_count == 1
+        assert workspace_row["execution_count"] == execution_count == 1
+        assert "password_hash" not in workspace_result.text
+
+        with TestClient(app) as target_client:
+            target_login = target_client.post(
+                "/api/v1/auth/login",
+                json={
+                    "email": users[0].email,
+                    "password": password,
+                },
+                headers={"Origin": origin},
+            )
+            assert target_login.status_code == 200
+            assert target_client.get("/api/v1/auth/user-session").status_code == 200
+            target_session_cookie = target_client.cookies.get(USER_SESSION_COOKIE)
+            assert target_session_cookie is not None
+
+        # The shared operator identity is not a public User; suspending an account
+        # cannot suspend the operator cookie, and that cookie remains authorized.
+        suspended = operator.patch(
+            f"/api/v1/platform-admin/users/{target_id}/status",
+            json={"status": "suspended"},
+            headers={"Origin": origin},
+        )
+        assert suspended.status_code == 200
+        with TestClient(app) as suspended_target:
+            suspended_target.cookies.set(USER_SESSION_COOKIE, target_session_cookie)
+            assert suspended_target.get("/api/v1/auth/user-session").status_code == 401
+        with Session(migrated_database) as session:
+            target = session.get(User, target_id)
+            assert target is not None and target.account_status == "suspended"
+            sessions = session.scalars(
+                select(UserSession).where(UserSession.user_id == target_id)
+            ).all()
+            assert sessions and all(item.revoked_at is not None for item in sessions)
+            audit = session.scalars(
+                select(PlatformAdminAudit).where(PlatformAdminAudit.target_user_id == target_id)
+            ).all()
+            assert len(audit) == 1
+            assert audit[0].action == "user_suspended"
+            assert audit[0].details == {"from": "active", "to": "suspended"}
+            assert "password" not in str(audit[0].details).casefold()
+            assert "session" not in str(audit[0].details).casefold()
+            audit_id = audit[0].id
+            with pytest.raises(DBAPIError):
+                session.execute(
+                    update(PlatformAdminAudit)
+                    .where(PlatformAdminAudit.id == audit_id)
+                    .values(action="rewritten")
+                )
+            session.rollback()
+            with pytest.raises(DBAPIError):
+                session.execute(delete(PlatformAdminAudit).where(PlatformAdminAudit.id == audit_id))
+            session.rollback()
+
+        for method in ("post", "patch", "delete"):
+            result = getattr(operator, method)(
+                f"/api/v1/platform-admin/audit/{audit_id}", headers={"Origin": origin}
+            )
+            assert result.status_code == 404
+
+        repeated = operator.patch(
+            f"/api/v1/platform-admin/users/{target_id}/status",
+            json={"status": "suspended"},
+            headers={"Origin": origin},
+        )
+        invalid = operator.patch(
+            f"/api/v1/platform-admin/users/{target_id}/status",
+            json={"status": "deleted"},
+            headers={"Origin": origin},
+        )
+        assert repeated.status_code == 409
+        assert invalid.status_code == 422
+        activity = operator.get("/api/v1/platform-admin/overview").json()["recent_activity"]
+        assert any(item["action"] == "user_suspended" for item in activity)
+        with Session(migrated_database) as session:
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(PlatformAdminAudit)
+                    .where(PlatformAdminAudit.target_user_id == target_id)
+                )
+                == 1
+            )
+
+        reactivated = operator.patch(
+            f"/api/v1/platform-admin/users/{target_id}/status",
+            json={"status": "active"},
+            headers={"Origin": origin},
+        )
+        assert reactivated.status_code == 200
+        assert reactivated.json()["account_status"] == "active"
+        assert operator.get("/api/v1/platform-admin/overview").status_code == 200
+        with Session(migrated_database) as session:
+            audit_rows = session.scalars(
+                select(PlatformAdminAudit)
+                .where(PlatformAdminAudit.target_user_id == target_id)
+                .order_by(PlatformAdminAudit.occurred_at)
+            ).all()
+            assert [row.action for row in audit_rows] == ["user_suspended", "user_active"]
+            assert all(
+                row.actor_type == "operator" and row.actor_user_id is None for row in audit_rows
+            )
+
+        public_headers = {"Origin": origin}
+        # Owner, workspace admin, and ordinary member have valid user sessions,
+        # but none can use platform APIs; denied requests cannot mutate the target.
+        with Session(migrated_database) as session:
+            protected_session_ids = set(
+                session.scalars(select(UserSession.id).where(UserSession.user_id == target_id))
+            )
+            protected_workspace_status = session.get(Workspace, workspace_id).status
+            protected_audit_count = session.scalar(
+                select(func.count())
+                .select_from(PlatformAdminAudit)
+                .where(PlatformAdminAudit.target_user_id == target_id)
+            )
+            session.execute(
+                update(User).where(User.id == target_id).values(account_status="active")
+            )
+            session.commit()
+        for user_id in user_ids[3:]:
+            with TestClient(app) as public_client:
+                public_email = next(user.email for user in users if user.id == user_id)
+                public_login = public_client.post(
+                    "/api/v1/auth/login",
+                    json={"email": public_email, "password": password},
+                    headers=public_headers,
+                )
+                assert public_login.status_code == 200
+                denied = public_client.get("/api/v1/platform-admin/overview")
+                denied_patch = public_client.patch(
+                    f"/api/v1/platform-admin/users/{target_id}/status",
+                    json={"status": "suspended"},
+                    headers=public_headers,
+                )
+                assert denied.status_code == 401
+                assert denied_patch.status_code == 401
+        with TestClient(app) as forged:
+            forged.cookies.set("agentforge_operator_session", "forged.payload")
+            assert forged.get("/api/v1/platform-admin/overview").status_code == 401
+        with TestClient(app) as bearer:
+            assert (
+                bearer.get(
+                    "/api/v1/platform-admin/overview",
+                    headers={"Authorization": f"Bearer {operator_credential}"},
+                ).status_code
+                == 401
+            )
+        with Session(migrated_database) as session:
+            assert session.get(User, target_id).account_status == "active"
+            assert (
+                set(session.scalars(select(UserSession.id).where(UserSession.user_id == target_id)))
+                == protected_session_ids
+            )
+            assert session.get(Workspace, workspace_id).status == protected_workspace_status
+            assert (
+                session.scalar(
+                    select(func.count())
+                    .select_from(PlatformAdminAudit)
+                    .where(PlatformAdminAudit.target_user_id == target_id)
+                )
+                == protected_audit_count
+            )
